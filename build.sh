@@ -7,8 +7,12 @@ for upkeep_arch in arm64 x86_64; do
     xcrun swiftc -target "$upkeep_arch-apple-macosx13.0" -swift-version 5 -O Source/main.swift -o ".build/Upkeep-$upkeep_arch" -framework AppKit -framework Carbon
 done
 xcrun lipo -create .build/Upkeep-arm64 .build/Upkeep-x86_64 -output "$APP/Contents/MacOS/Upkeep"
+upkeep_archs=$(xcrun lipo -archs "$APP/Contents/MacOS/Upkeep")
 for upkeep_arch in arm64 x86_64; do
-    xcrun lipo -verify_arch "$upkeep_arch" "$APP/Contents/MacOS/Upkeep"
+    case " $upkeep_archs " in
+        *" $upkeep_arch "*) ;;
+        *) echo "Universal build is missing $upkeep_arch (found: $upkeep_archs)" >&2; exit 1 ;;
+    esac
 done
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
