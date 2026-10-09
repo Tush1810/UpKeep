@@ -15,13 +15,27 @@ func durationNumber(_ value: Double) -> String {
     return text
 }
 
-func coffeeIcon(active: Bool, size: CGFloat = 22) -> NSImage {
+enum SessionMode {
+    case off, timed, unlimited, displayAwake
+
+    var color: NSColor {
+        switch self {
+        case .off: return .labelColor
+        case .timed: return NSColor(srgbRed: 245 / 255.0, green: 166 / 255.0, blue: 35 / 255.0, alpha: 1)
+        case .unlimited: return NSColor(srgbRed: 167 / 255.0, green: 139 / 255.0, blue: 250 / 255.0, alpha: 1)
+        case .displayAwake: return NSColor(srgbRed: 34 / 255.0, green: 211 / 255.0, blue: 238 / 255.0, alpha: 1)
+        }
+    }
+}
+
+func coffeeIcon(mode: SessionMode, size: CGFloat = 22) -> NSImage {
+    let active = mode != .off
     let image = NSImage(size: NSSize(width: size, height: size), flipped: false) { rect in
         let scale = size / 22
         let transform = NSAffineTransform()
         transform.scale(by: scale)
         transform.concat()
-        (active ? NSColor.systemOrange : NSColor.labelColor).set()
+        mode.color.set()
         let cup = NSBezierPath(roundedRect: NSRect(x: 3, y: 5, width: 12, height: 10), xRadius: 3, yRadius: 3)
         cup.lineWidth = 1.6
         active ? cup.fill() : cup.stroke()
@@ -49,6 +63,10 @@ final class Session {
     var keepsDisplayAwake = false
     var changed: (() -> Void)?
     var running: Bool { process?.isRunning == true }
+    var mode: SessionMode {
+        guard running else { return .off }
+        return keepsDisplayAwake ? .displayAwake : deadline == nil ? .unlimited : .timed
+    }
     func start(seconds: Int?, keepDisplayAwake: Bool = false) throws {
         if running { stop() }
         let child = Process()
@@ -228,13 +246,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     func refresh() {
         let active = session.running
         stateLabel?.stringValue = active ? (session.keepsDisplayAwake ? "Upkeep active · display awake" : session.deadline == nil ? "Upkeep active · unlimited" : "Upkeep session active") : "Upkeep is off"
-        stateLabel?.textColor = active ? .systemOrange : .secondaryLabelColor
+        stateLabel?.textColor = active ? session.mode.color : .secondaryLabelColor
         startButton?.title = session.running ? "Stop Upkeep" : "Start Upkeep"
         enableButton?.title = eventTap == nil ? "Enable for all apps…" : "Enabled for all apps ✓"
         enableButton?.isEnabled = eventTap == nil
         permissionLabel?.stringValue = eventTap == nil ? "Input Monitoring needed for other apps." : "Shortcuts are ready in every app."
-        item.button?.image = coffeeIcon(active: active)
-        settingsIcon?.image = coffeeIcon(active: active, size: 48)
+        item.button?.image = coffeeIcon(mode: session.mode)
+        settingsIcon?.image = coffeeIcon(mode: session.mode, size: 48)
         if session.running, let deadline = session.deadline {
             let remaining = max(0, Int(ceil(deadline.timeIntervalSinceNow)))
             item.button?.title = String(format: " %d:%02d", remaining / 60, remaining % 60)
@@ -343,7 +361,7 @@ if CommandLine.arguments.contains("--export-icon") {
     let image = NSImage(size: NSSize(width: 1024, height: 1024), flipped: false) { _ in
         NSColor(calibratedRed: 0.12, green: 0.075, blue: 0.05, alpha: 1).setFill()
         NSBezierPath(roundedRect: NSRect(x: 0, y: 0, width: 1024, height: 1024), xRadius: 220, yRadius: 220).fill()
-        coffeeIcon(active: true, size: 640).draw(in: NSRect(x: 192, y: 192, width: 640, height: 640))
+        coffeeIcon(mode: .timed, size: 640).draw(in: NSRect(x: 192, y: 192, width: 640, height: 640))
         return true
     }
     let bitmap = NSBitmapImageRep(data: image.tiffRepresentation!)!

@@ -11,7 +11,7 @@ Upkeep is a small native macOS menu bar app powered by Apple's `caffeinate` comm
 - Duration settings in **minutes or hours**, including fractional values.
 - Global keyboard shortcuts for starting, stopping, and opening Settings.
 - A timed **display-awake** mode to keep the screen from going black through idle display sleep.
-- An amber coffee cup with a countdown or **∞** while active; an outlined cup while off.
+- A color for each active mode, with a countdown or **∞**; an outlined cup while off.
 - Native Swift and AppKit, with no third-party dependencies.
 
 ## Install
@@ -97,7 +97,7 @@ The shortcuts are currently fixed. The listener is passive, so a shortcut can al
 
 Pressing Control + I during an unlimited session leaves it running. Double-tap Control, choose **Stop Upkeep session** from the menu, or quit Upkeep to stop it.
 
-**Control + D** starts a fresh timed session with display sleep prevention. It replaces any current session and uses the same duration as double-Control. Holding the keys does not repeatedly restart the timer. The countdown remains amber, and the menu, tooltip, and Settings identify **display awake** mode. Double-Control stops it; its sleep prevention also ends when the timer expires or you quit Upkeep. Switching to Control + I releases display sleep prevention and starts the usual unlimited session.
+**Control + D** starts a fresh timed session with display sleep prevention. It replaces any current session and uses the same duration as double-Control. Holding the keys does not repeatedly restart the timer. The cup turns cyan with a countdown, and the menu, tooltip, and Settings identify **display awake** mode. Double-Control stops it; its sleep prevention also ends when the timer expires or you quit Upkeep. Switching to Control + I releases display sleep prevention and starts the usual unlimited session.
 
 ### Change the duration
 
@@ -118,8 +118,11 @@ Your duration is remembered between launches and applies to the **next timed ses
 | Indicator | State |
 | --- | --- |
 | Outlined coffee cup | Upkeep is off |
-| Amber cup and countdown | A timed session is running |
-| Amber cup and **∞** | An unlimited session is running |
+| Amber cup (`#F5A623`) and countdown | A timed session is running |
+| Violet cup (`#A78BFA`) and **∞** | An unlimited session is running |
+| Cyan cup (`#22D3EE`) and countdown | A timed session keeps the display awake |
+
+The Settings coffee cup and active status text use the same mode color. Countdowns, **∞**, tooltips, and existing status labels remain available alongside the colors.
 
 Hold **Command** and drag the icon to reposition it in the menu bar.
 
