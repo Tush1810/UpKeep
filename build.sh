@@ -2,8 +2,14 @@
 set -eu
 cd "${0:A:h}"
 APP="$PWD/Upkeep.app"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-xcrun swiftc -target "$(uname -m)-apple-macosx13.0" -swift-version 5 -O Source/main.swift -o "$APP/Contents/MacOS/Upkeep" -framework AppKit -framework Carbon
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" .build
+for upkeep_arch in arm64 x86_64; do
+    xcrun swiftc -target "$upkeep_arch-apple-macosx13.0" -swift-version 5 -O Source/main.swift -o ".build/Upkeep-$upkeep_arch" -framework AppKit -framework Carbon
+done
+xcrun lipo -create .build/Upkeep-arm64 .build/Upkeep-x86_64 -output "$APP/Contents/MacOS/Upkeep"
+for upkeep_arch in arm64 x86_64; do
+    xcrun lipo -verify_arch "$upkeep_arch" "$APP/Contents/MacOS/Upkeep"
+done
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

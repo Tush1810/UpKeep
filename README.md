@@ -19,9 +19,11 @@ Upkeep is a small native macOS menu bar app powered by Apple's `caffeinate` comm
 ### Requirements
 
 - A Mac running **macOS 13 Ventura or later**.
-- Apple's **Command Line Tools for Xcode**, or a full Xcode installation.
+- Apple's **Command Line Tools for Xcode** (Xcode 14 or later), or a full Xcode installation.
 
-Build on the Mac where you plan to use Upkeep. The build creates an app for that Mac's architecture: Apple Silicon or Intel, rather than a universal binary. Homebrew is not required.
+The build creates a **universal app** containing both Apple Silicon and Intel code, with a minimum deployment version of **macOS 13**. You can copy the resulting app to another supported Mac. Homebrew is not required. Newer optional menu-icon behavior is detected at runtime, so building on macOS 26 does not require the macOS 27 SDK.
+
+Compatibility is targeted for macOS 13 and later. Automated runtime checks currently run on the development Mac; older macOS versions need a separate on-device check before claiming they have been tested.
 
 ### 1. Install Apple's developer tools
 

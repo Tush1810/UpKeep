@@ -149,6 +149,13 @@ func menuSymbol(_ name: String, color: NSColor = .labelColor) -> NSImage? {
     return NSImage(systemSymbolName: name, accessibilityDescription: nil)?.withSymbolConfiguration(config)
 }
 
+func keepMenuIconVisible(_ entry: NSMenuItem) {
+    // Resolve at runtime so this source also builds with SDKs older than macOS 27.
+    if #available(macOS 27.0, *), entry.responds(to: NSSelectorFromString("setPreferredImageVisibility:")) {
+        entry.setValue(NSNumber(value: 1), forKey: "preferredImageVisibility")
+    }
+}
+
 enum SessionError: LocalizedError {
     case couldNotStop
     var errorDescription: String? { "The previous session could not be stopped. No replacement was started." }
@@ -446,7 +453,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     @discardableResult
     func add(_ title: String, _ action: Selector) -> NSMenuItem {
         let entry = NSMenuItem(title: title, action: action, keyEquivalent: "")
-        if #available(macOS 27.0, *) { entry.preferredImageVisibility = .visible }
+        keepMenuIconVisible(entry)
         entry.target = self; menu.addItem(entry); return entry
     }
     func showSessionError(_ error: Error) {
@@ -781,7 +788,7 @@ if CommandLine.arguments.contains("--lifecycle-test-owner") {
         for item in controller.menu.items where item.action != nil {
             precondition(item.image != nil, "Menu action must have its icon")
             if #available(macOS 27.0, *) {
-                precondition(item.preferredImageVisibility == .visible, "Menu icons must remain visible on macOS 27")
+                precondition(item.value(forKey: "preferredImageVisibility") as? NSNumber == NSNumber(value: 1), "Menu icons must remain visible on macOS 27")
             }
         }
         guard let entry = controller.menu.items.first(where: { $0.title == title }), let action = entry.action else { preconditionFailure("Missing menu action: \(title)") }
