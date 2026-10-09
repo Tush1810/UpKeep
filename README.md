@@ -101,7 +101,7 @@ Pressing Control + I during an unlimited session leaves it running. Double-tap C
 
 ### Switch modes from the coffee cup
 
-The menu always offers **Timed**, **Infinite**, and **Timed + display**. A checkmark identifies the active mode. It shows the current mode plus remaining minutes or **No time limit** at the top.
+The menu always offers **Timed**, **Infinite**, and **Timed + display**. A checkmark identifies the active mode. A rounded status card at the top shows the coffee cup, active mode, a live countdown or **No time limit**, and whether the display stays awake. Each mode has a colored symbol; the checked mode also uses a heavier label. Session controls and Settings are separated into clear groups, with a compact shortcut reminder. The menu follows the Mac’s light or dark appearance and keeps native mouse and keyboard navigation.
 
 | Selection | Behavior |
 | --- | --- |

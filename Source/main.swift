@@ -67,6 +67,57 @@ func coffeeIcon(mode: SessionMode, size: CGFloat = 22) -> NSImage {
     return image
 }
 
+// A read-only status card; actions stay native NSMenuItems for keyboard navigation.
+final class MenuStatusCard: NSView {
+    let coffee = NSImageView(frame: NSRect(x: 22, y: 70, width: 30, height: 30))
+    let brand = NSTextField(labelWithString: "Upkeep")
+    let modeLabel = NSTextField(labelWithString: "Off")
+    let countdown = NSTextField(labelWithString: "Ready when you are")
+    let detail = NSTextField(labelWithString: "")
+    private var mode: SessionMode = .off
+    init() {
+        super.init(frame: NSRect(x: 0, y: 0, width: 300, height: 122))
+        brand.frame = NSRect(x: 66, y: 84, width: 210, height: 22)
+        brand.font = .systemFont(ofSize: 17, weight: .semibold)
+        modeLabel.frame = NSRect(x: 66, y: 65, width: 210, height: 17)
+        modeLabel.font = .systemFont(ofSize: 11, weight: .semibold)
+        countdown.frame = NSRect(x: 22, y: 31, width: 256, height: 27)
+        detail.frame = NSRect(x: 22, y: 11, width: 256, height: 17)
+        detail.font = .systemFont(ofSize: 11); detail.textColor = .secondaryLabelColor
+        for view in [coffee, brand, modeLabel, countdown, detail] { addSubview(view) }
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+    func update(mode: SessionMode, deadline: Date?, seconds: Int) {
+        self.mode = mode
+        coffee.image = coffeeIcon(mode: mode, size: 30)
+        modeLabel.stringValue = mode.title.uppercased()
+        modeLabel.textColor = mode == .off ? .secondaryLabelColor : mode.color
+        countdown.font = mode == .off ? .systemFont(ofSize: 17, weight: .medium) : .monospacedDigitSystemFont(ofSize: 23, weight: .semibold)
+        if mode == .off {
+            countdown.stringValue = "Ready when you are"
+            detail.stringValue = "Default session · \(durationNumber(Double(seconds) / 60)) min"
+        } else if let deadline {
+            let remaining = max(0, Int(ceil(deadline.timeIntervalSinceNow)))
+            countdown.stringValue = String(format: "%d:%02d remaining", remaining / 60, remaining % 60)
+            detail.stringValue = mode == .displayAwake ? "Mac + display stay awake" : "Mac stays awake · display can sleep"
+        } else {
+            countdown.stringValue = "∞  No time limit"
+            detail.stringValue = "Mac stays awake · display can sleep"
+        }
+        needsDisplay = true
+    }
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        (mode == .off ? NSColor.controlBackgroundColor.withAlphaComponent(0.55) : mode.color.withAlphaComponent(0.08)).setFill()
+        NSBezierPath(roundedRect: bounds.insetBy(dx: 8, dy: 4), xRadius: 10, yRadius: 10).fill()
+    }
+}
+func menuSymbol(_ name: String, color: NSColor = .labelColor) -> NSImage? {
+    let config = NSImage.SymbolConfiguration(pointSize: 14, weight: .medium)
+        .applying(NSImage.SymbolConfiguration(paletteColors: [color]))
+    return NSImage(systemSymbolName: name, accessibilityDescription: nil)?.withSymbolConfiguration(config)
+}
+
 enum SessionError: LocalizedError {
     case couldNotStop
     var errorDescription: String? { "The previous session could not be stopped. No replacement was started." }
@@ -178,6 +229,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     var preferences = UserDefaults.standard
     var item: NSStatusItem!
     let menu = NSMenu()
+    var menuCard: MenuStatusCard?
     var timer: Timer?
     var externalCount = 0
     var scanPending = false
@@ -303,6 +355,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         }
     }
     func refresh() {
+        menuCard?.update(mode: session.mode, deadline: session.deadline, seconds: seconds)
         let active = session.running
         stateLabel?.stringValue = active ? (session.keepsDisplayAwake ? "Upkeep active · display awake" : session.deadline == nil ? "Upkeep active · unlimited" : "Upkeep session active") : "Upkeep is off"
         stateLabel?.textColor = active ? session.mode.color : .secondaryLabelColor
@@ -326,26 +379,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
     func menuWillOpen(_ menu: NSMenu) {
         menu.removeAllItems()
-        menu.addItem(NSMenuItem(title: "Upkeep · \(session.mode.title)", action: nil, keyEquivalent: ""))
-        if session.running {
-            let detail = session.deadline.map { "\(Int(ceil(max(0, $0.timeIntervalSinceNow) / 60))) minutes remaining" } ?? "No time limit"
-            menu.addItem(NSMenuItem(title: detail, action: nil, keyEquivalent: ""))
-        }
+        let header = NSMenuItem(title: "Upkeep · \(session.mode.title)", action: nil, keyEquivalent: "")
+        let card = MenuStatusCard(); card.update(mode: session.mode, deadline: session.deadline, seconds: seconds)
+        header.view = card; menuCard = card; menu.addItem(header)
         if externalCount > 0 { menu.addItem(NSMenuItem(title: "\(externalCount) external session(s) · managed elsewhere", action: nil, keyEquivalent: "")) }
         menu.addItem(.separator())
+        let section = NSMenuItem(title: "CHOOSE A MODE", action: nil, keyEquivalent: "")
+        section.attributedTitle = NSAttributedString(string: section.title, attributes: [.font: NSFont.systemFont(ofSize: 10, weight: .semibold), .foregroundColor: NSColor.secondaryLabelColor])
+        menu.addItem(section)
         for (mode, action) in [(SessionMode.timed, #selector(startTimed(_:))), (.unlimited, #selector(startUnlimited(_:))), (.displayAwake, #selector(startDisplayAwake(_:)))] {
             let entry = add(mode.title, action)
             entry.state = session.mode == mode ? .on : .off
+            entry.image = menuSymbol(mode == .timed ? "timer" : mode == .unlimited ? "infinity" : "display", color: mode.color)
+            entry.attributedTitle = NSAttributedString(string: mode.title, attributes: [.font: NSFont.systemFont(ofSize: 13, weight: session.mode == mode ? .semibold : .regular)])
+
         }
         if session.keepsDisplayAwake { menu.addItem(NSMenuItem(title: "Display kept awake until this session ends", action: nil, keyEquivalent: "")) }
         menu.addItem(.separator())
         if session.running, session.deadline != nil {
-            add("Restart timer · \(durationNumber(Double(seconds) / 60)) minutes", #selector(restartTimer(_:)))
+            add("Restart timer · \(durationNumber(Double(seconds) / 60)) minutes", #selector(restartTimer(_:))).image = menuSymbol("arrow.clockwise")
         }
-        if session.running { add("Stop Upkeep", #selector(stopSession(_:))) }
-        menu.addItem(NSMenuItem(title: "Toggle: double-tap ⌃ Control", action: nil, keyEquivalent: ""))
-        menu.addItem(.separator()); add("Settings…", #selector(showSettings(_:)))
-        add("Quit Upkeep", #selector(quit(_:)))
+        if session.running { add("Stop Upkeep", #selector(stopSession(_:))).image = menuSymbol("stop.circle.fill", color: .systemRed) }
+        let hint = NSMenuItem(title: "⌃ twice · start / stop    ⌃⇧ · settings", action: nil, keyEquivalent: "")
+        hint.attributedTitle = NSAttributedString(string: hint.title, attributes: [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.secondaryLabelColor])
+        menu.addItem(hint)
+
+        menu.addItem(.separator()); add("Settings…", #selector(showSettings(_:))).image = menuSymbol("gearshape")
+        add("Quit Upkeep", #selector(quit(_:))).image = menuSymbol("power")
     }
     @discardableResult
     func add(_ title: String, _ action: Selector) -> NSMenuItem {
