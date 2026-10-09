@@ -126,9 +126,18 @@ The Settings coffee cup and active status text use the same mode color. Countdow
 
 Hold **Command** and drag the icon to reposition it in the menu bar.
 
-Standard timed and unlimited sessions prevent **idle system sleep** and let the display sleep according to macOS settings. Control + D additionally prevents **idle display sleep**, using `caffeinate -di -t <seconds>`. Standard timed sessions use `caffeinate -t <seconds>`; unlimited sessions use `caffeinate`. These modes do not override lid-close behavior or explicit sleep/lock actions. Other caffeinate processes appear separately in the menu and tooltip; Upkeep stops only its own process.
+Standard timed and unlimited sessions prevent **idle system sleep** and let the display sleep according to macOS settings. Control + D additionally prevents **idle display sleep**, using `caffeinate -di -t <seconds>`. Standard timed sessions use `caffeinate -t <seconds>`; unlimited sessions use `caffeinate`. These modes do not override lid-close behavior or explicit sleep/lock actions. Each command also includes `-w <Upkeep PID>` so it ends when its owning app exits, including a force-quit. Other caffeinate processes appear separately in the menu and tooltip; Upkeep stops only its own process.
+
+## Process cleanup
+
+Every session watches its owning Upkeep process using caffeinate's `-w` option. Timed modes end on timeout or owner exit; unlimited mode ends on stop or owner exit. Normal stopping and quitting also terminate the owned child explicitly.
+
+Session changes are serialized on the main thread. Switching stops the old process before starting its replacement, and delayed exit callbacks check process identity before changing state. Stopping allows 250 ms for normal termination, then uses a targeted forced kill with a further 750 ms bound. If the previous child still cannot be stopped, Upkeep reports an error and does not start another process. Other applications' caffeinate processes are left alone.
+
+The owner watcher depends on macOS scheduling caffeinate; it is not an instantaneous cleanup guarantee if the child itself is externally suspended or the OS is stalled.
 
 ## Update
+
 
 Quit Upkeep from its menu first. In your cloned repository, run:
 
@@ -174,7 +183,7 @@ The default branch is **dev**. After building, run the built-in checks:
 ./Upkeep.app/Contents/MacOS/Upkeep --self-test
 ```
 
-These checks cover duration conversion and validation, saving and closing Settings, timed expiry, unlimited sessions, session transitions, process cleanup, double-Control detection, and shortcut action routing. Display-awake checks inspect the actual macOS display and system power assertions, verify their release on timeout and stop, and check mode transitions, key-repeat filtering, and use of the saved duration. Tests briefly open a Settings window and restore the saved duration afterward.
+These checks cover duration conversion and validation, saving and closing Settings, timed expiry, unlimited sessions, session transitions, process cleanup, double-Control detection, and shortcut action routing. Display-awake checks inspect the actual macOS display and system power assertions, verify their release on timeout and stop, and check mode transitions, key-repeat filtering, and use of the saved duration. Lifecycle checks also kill isolated owner fixtures in every mode, test immediate owner death, stop a frozen child, check rapid replacements and stale callbacks, and verify unrelated caffeinate processes are untouched. Tests briefly open a Settings window and restore the saved duration afterward.
 
 For an end-to-end global shortcut check, enable Input Monitoring and focus another app:
 

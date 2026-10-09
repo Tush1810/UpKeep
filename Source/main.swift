@@ -57,7 +57,13 @@ func coffeeIcon(mode: SessionMode, size: CGFloat = 22) -> NSImage {
     return image
 }
 
+enum SessionError: LocalizedError {
+    case couldNotStop
+    var errorDescription: String? { "The previous session could not be stopped. No replacement was started." }
+}
+
 final class Session {
+
     var process: Process?
     var deadline: Date?
     var keepsDisplayAwake = false
@@ -68,10 +74,11 @@ final class Session {
         return keepsDisplayAwake ? .displayAwake : deadline == nil ? .unlimited : .timed
     }
     func start(seconds: Int?, keepDisplayAwake: Bool = false) throws {
-        if running { stop() }
+        precondition(Thread.isMainThread, "Session changes must run on the main thread")
+        try stop()
         let child = Process()
         child.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate")
-        child.arguments = (keepDisplayAwake ? ["-di"] : []) + (seconds.map { ["-t", String($0)] } ?? [])
+        child.arguments = (keepDisplayAwake ? ["-di"] : []) + (seconds.map { ["-t", String($0)] } ?? []) + ["-w", String(ProcessInfo.processInfo.processIdentifier)]
         child.terminationHandler = { [weak self, weak child] _ in
             DispatchQueue.main.async {
                 guard let self, self.process === child else { return }
@@ -82,12 +89,28 @@ final class Session {
         process = child; deadline = seconds.map { Date().addingTimeInterval(Double($0)) }
         keepsDisplayAwake = keepDisplayAwake; changed?()
     }
-    func stop() {
-        let child = process
+    func stop() throws {
+        precondition(Thread.isMainThread, "Session changes must run on the main thread")
+        if let child = process, child.isRunning {
+            child.terminate()
+            waitForExit(child, timeout: 0.25)
+            if child.isRunning {
+                // Only signal the child owned by this Session, never other caffeinate processes.
+                kill(child.processIdentifier, SIGKILL)
+                waitForExit(child, timeout: 0.75)
+            }
+            guard !child.isRunning else { throw SessionError.couldNotStop }
+        }
         process = nil; deadline = nil; keepsDisplayAwake = false
-        if child?.isRunning == true { child?.terminate(); child?.waitUntilExit() }
         changed?()
     }
+    private func waitForExit(_ child: Process, timeout: TimeInterval) {
+        let end = ProcessInfo.processInfo.systemUptime + timeout
+        while child.isRunning && ProcessInfo.processInfo.systemUptime < end {
+            Thread.sleep(forTimeInterval: 0.005)
+        }
+    }
+
 }
 
 // Two complete Control taps; typing, mouse clicks, chords, or holds cancel the sequence.
@@ -280,8 +303,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         add("Quit Upkeep", #selector(quit(_:)))
     }
     func add(_ title: String, _ action: Selector) { let entry = NSMenuItem(title: title, action: action, keyEquivalent: ""); entry.target = self; menu.addItem(entry) }
+    func showSessionError(_ error: Error) {
+        let alert = NSAlert(); alert.messageText = "Couldn’t change Upkeep session"; alert.informativeText = error.localizedDescription; alert.runModal()
+    }
     @objc func toggle(_ sender: Any?) {
-        if session.running { session.stop() } else {
+
+        if session.running { do { try session.stop() } catch { showSessionError(error) } } else {
             do { try session.start(seconds: seconds) } catch {
                 let alert = NSAlert(); alert.messageText = "Couldn’t start caffeinate"; alert.informativeText = error.localizedDescription; alert.runModal()
             }
@@ -350,14 +377,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
     @objc func quit(_ sender: Any?) { NSApp.terminate(nil) }
     func applicationWillTerminate(_ notification: Notification) {
-        timer?.invalidate(); session.stop()
+        timer?.invalidate(); try? session.stop()
         if let localMonitor { NSEvent.removeMonitor(localMonitor) }
         if let eventTap { CFMachPortInvalidate(eventTap) }
         if let tapSource { CFRunLoopRemoveSource(CFRunLoopGetMain(), tapSource, .commonModes) }
     }
 }
 
-if CommandLine.arguments.contains("--export-icon") {
+// Subprocess fixture for testing owner death without force-quitting the user's installed app.
+if CommandLine.arguments.contains("--lifecycle-test-owner") {
+    let mode = CommandLine.arguments.last!
+    let fixture = Session()
+    try fixture.start(seconds: mode == "unlimited" ? nil : 60, keepDisplayAwake: mode == "display")
+    FileHandle.standardOutput.write(Data("\(fixture.process!.processIdentifier)\n".utf8))
+    while true { RunLoop.current.run(until: Date().addingTimeInterval(0.1)) }
+} else if CommandLine.arguments.contains("--export-icon") {
+
     let image = NSImage(size: NSSize(width: 1024, height: 1024), flipped: false) { _ in
         NSColor(calibratedRed: 0.12, green: 0.075, blue: 0.05, alpha: 1).setFill()
         NSBezierPath(roundedRect: NSRect(x: 0, y: 0, width: 1024, height: 1024), xRadius: 220, yRadius: 220).fill()
@@ -395,28 +430,29 @@ if CommandLine.arguments.contains("--export-icon") {
     precondition(!detector.flags(key: 59, down: false, otherModifier: false, time: 6.5))
     precondition(!controlTap(59, 6.6, 6.7), "Control chords must not count")
     print("PASS: double Control, both sides, slow taps, holds, typing, and modifier chords")
+    let ownerArguments = ["-w", String(ProcessInfo.processInfo.processIdentifier)]
     let session = Session()
     try session.start(seconds: 2)
-    precondition(session.running && session.process?.arguments == ["-t", "2"])
+    precondition(session.running && session.process?.arguments == ["-t", "2"] + ownerArguments)
     let until = Date().addingTimeInterval(4)
     while session.running && Date() < until { RunLoop.current.run(until: Date().addingTimeInterval(0.1)) }
     precondition(!session.running, "Session failed to expire")
     try session.start(seconds: 30)
     let pid = session.process!.processIdentifier
-    session.stop()
+    try session.stop()
     precondition(!session.running && kill(pid, 0) == -1, "Session failed to stop")
     try session.start(seconds: nil)
-    precondition(session.running && session.deadline == nil && session.process?.arguments == [])
+    precondition(session.running && session.deadline == nil && session.process?.arguments == ownerArguments)
     let unlimitedPID = session.process!.processIdentifier
     RunLoop.current.run(until: Date().addingTimeInterval(2.5))
     precondition(session.running, "Unlimited session must stay running")
-    session.stop()
+    try session.stop()
     precondition(kill(unlimitedPID, 0) == -1)
     try session.start(seconds: 30)
     let timedPID = session.process!.processIdentifier
     try session.start(seconds: nil)
     precondition(kill(timedPID, 0) == -1 && session.running && session.deadline == nil)
-    session.stop()
+    try session.stop()
     print("PASS: timed expiry, unlimited session, timed-to-unlimited replacement, restart, and cleanup")
     func ownedAssertions(_ pid: Int32) throws -> String {
         let command = Process(); let output = Pipe()
@@ -438,7 +474,7 @@ if CommandLine.arguments.contains("--export-icon") {
     }
     try session.start(seconds: 3, keepDisplayAwake: true)
     let displayPID = session.process!.processIdentifier
-    precondition(session.keepsDisplayAwake && session.process?.arguments == ["-di", "-t", "3"])
+    precondition(session.keepsDisplayAwake && session.process?.arguments == ["-di", "-t", "3"] + ownerArguments)
     try verifyDisplayAssertions(displayPID)
     let displayExpiry = Date().addingTimeInterval(5)
     while session.running && Date() < displayExpiry { RunLoop.current.run(until: Date().addingTimeInterval(0.1)) }
@@ -461,7 +497,7 @@ if CommandLine.arguments.contains("--export-icon") {
     }
     controller.handleShortcutEvent(type: .keyDown, key: 34, flags: .maskControl, time: 10)
     drain()
-    precondition(controller.session.running && controller.session.deadline == nil && controller.session.process?.arguments == [])
+    precondition(controller.session.running && controller.session.deadline == nil && controller.session.process?.arguments == ownerArguments)
     let firstPID = controller.session.process!.processIdentifier
     controller.handleShortcutEvent(type: .keyDown, key: 34, flags: .maskControl, time: 11, repeated: true)
     drain()
@@ -469,7 +505,7 @@ if CommandLine.arguments.contains("--export-icon") {
     controlDouble(12)
     precondition(!controller.session.running, "Double Control must stop unlimited session")
     controlDouble(13)
-    precondition(controller.session.running && controller.session.process?.arguments == ["-t", String(controller.seconds)])
+    precondition(controller.session.running && controller.session.process?.arguments == ["-t", String(controller.seconds)] + ownerArguments)
     controlDouble(14)
     precondition(!controller.session.running, "Double Control must stop timed session")
     controller.handleShortcutEvent(type: .flagsChanged, key: 59, flags: .maskControl, time: 15)
@@ -513,7 +549,7 @@ if CommandLine.arguments.contains("--export-icon") {
     precondition(!controller.session.running, "Only unmodified Control D may start display mode")
     controller.handleShortcutEvent(type: .keyDown, key: 2, flags: .maskControl, time: 21)
     drain()
-    precondition(controller.session.keepsDisplayAwake && controller.session.process?.arguments == ["-di", "-t", "5400"], "Control D must use the saved duration")
+    precondition(controller.session.keepsDisplayAwake && controller.session.process?.arguments == ["-di", "-t", "5400"] + ownerArguments, "Control D must use the saved duration")
     let shortcutDisplayPID = controller.session.process!.processIdentifier
     try verifyDisplayAssertions(shortcutDisplayPID)
     controller.refresh(); controller.menuWillOpen(controller.menu)
@@ -528,7 +564,7 @@ if CommandLine.arguments.contains("--export-icon") {
     precondition(stoppedAssertions.isEmpty, "Double Control must release display assertions")
     controlDouble(23)
     let plainPID = controller.session.process!.processIdentifier
-    precondition(!controller.session.keepsDisplayAwake && controller.session.process?.arguments == ["-t", "5400"])
+    precondition(!controller.session.keepsDisplayAwake && controller.session.process?.arguments == ["-t", "5400"] + ownerArguments)
     controller.handleShortcutEvent(type: .keyDown, key: 2, flags: .maskControl, time: 24)
     drain()
     precondition(kill(plainPID, 0) == -1 && controller.session.keepsDisplayAwake, "Control D must replace the timed session")
@@ -546,6 +582,48 @@ if CommandLine.arguments.contains("--export-icon") {
     controller.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
     precondition(!controller.session.running && !controller.session.keepsDisplayAwake)
     print("PASS: Control D saved duration, repeat/chord filtering, indicators, double Control stop, mode replacement and quit cleanup")
+    // Exercise the actual OS owner watcher, including death immediately after spawn.
+    for signal in [SIGTERM, SIGKILL] {
+        for mode in ["timed", "unlimited", "display"] {
+            for attempt in 0..<3 {
+                let owner = Process(); let output = Pipe()
+                owner.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+                owner.arguments = ["--lifecycle-test-owner", mode]; owner.standardOutput = output
+                try owner.run()
+                let data = output.fileHandleForReading.availableData
+                guard let childPID = Int32(String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)) else { preconditionFailure("Missing fixture PID") }
+                if attempt == 0 { RunLoop.current.run(until: Date().addingTimeInterval(0.2)) }
+                kill(owner.processIdentifier, signal); owner.waitUntilExit()
+                let limit = ProcessInfo.processInfo.systemUptime + 4
+                while kill(childPID, 0) == 0 && ProcessInfo.processInfo.systemUptime < limit { Thread.sleep(forTimeInterval: 0.01) }
+                precondition(kill(childPID, 0) == -1, "Owner death left a caffeinate process behind")
+                let assertions = try ownedAssertions(childPID)
+                precondition(assertions.isEmpty, "Owner death left sleep prevention behind")
+            }
+        }
+    }
+    let unrelated = Process()
+    unrelated.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate"); unrelated.arguments = ["-t", "30"]
+    try unrelated.run()
+    try session.start(seconds: nil)
+    let frozenPID = session.process!.processIdentifier
+    kill(frozenPID, SIGSTOP)
+    let stopStart = ProcessInfo.processInfo.systemUptime
+    try session.stop()
+    precondition(ProcessInfo.processInfo.systemUptime - stopStart < 1.5, "Stopping a frozen child exceeded the bound")
+    precondition(kill(frozenPID, 0) == -1 && unrelated.isRunning, "Stop must clean up only its own child")
+    unrelated.terminate(); unrelated.waitUntilExit()
+    for index in 0..<30 {
+        try session.start(seconds: index % 2 == 0 ? nil : 30, keepDisplayAwake: index % 3 == 0)
+        let currentPID = session.process!.processIdentifier
+        RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+        precondition(session.process?.processIdentifier == currentPID && session.running, "An old termination callback cleared the new session")
+    }
+    let finalPID = session.process!.processIdentifier
+    try session.stop()
+    precondition(kill(finalPID, 0) == -1)
+    print("PASS: all modes clean up after SIGTERM/SIGKILL and immediate owner death; frozen-child stop bounded; external process untouched; 30 rapid replacements")
+
 } else {
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
