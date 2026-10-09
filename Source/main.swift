@@ -46,25 +46,27 @@ func coffeeIcon(active: Bool, size: CGFloat = 22) -> NSImage {
 final class Session {
     var process: Process?
     var deadline: Date?
+    var keepsDisplayAwake = false
     var changed: (() -> Void)?
     var running: Bool { process?.isRunning == true }
-    func start(seconds: Int?) throws {
+    func start(seconds: Int?, keepDisplayAwake: Bool = false) throws {
         if running { stop() }
         let child = Process()
         child.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate")
-        child.arguments = seconds.map { ["-t", String($0)] } ?? []
+        child.arguments = (keepDisplayAwake ? ["-di"] : []) + (seconds.map { ["-t", String($0)] } ?? [])
         child.terminationHandler = { [weak self, weak child] _ in
             DispatchQueue.main.async {
                 guard let self, self.process === child else { return }
-                self.process = nil; self.deadline = nil; self.changed?()
+                self.process = nil; self.deadline = nil; self.keepsDisplayAwake = false; self.changed?()
             }
         }
         try child.run()
-        process = child; deadline = seconds.map { Date().addingTimeInterval(Double($0)) }; changed?()
+        process = child; deadline = seconds.map { Date().addingTimeInterval(Double($0)) }
+        keepsDisplayAwake = keepDisplayAwake; changed?()
     }
     func stop() {
         let child = process
-        process = nil; deadline = nil
+        process = nil; deadline = nil; keepsDisplayAwake = false
         if child?.isRunning == true { child?.terminate(); child?.waitUntilExit() }
         changed?()
     }
@@ -153,6 +155,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             DispatchQueue.main.async { [weak self] in self?.startUnlimited(nil) }
             return
         }
+        if type == .keyDown && key == 2 && control && !other && !repeated {
+            controlDetector.reset()
+            DispatchQueue.main.async { [weak self] in self?.startDisplayAwake(nil) }
+            return
+        }
         guard type == .flagsChanged else { controlDetector.reset(); return }
         if controlDetector.flags(key: key, down: control, otherModifier: other, time: time) {
             DispatchQueue.main.async { [weak self] in self?.toggle(nil) }
@@ -220,7 +227,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
     func refresh() {
         let active = session.running
-        stateLabel?.stringValue = active ? (session.deadline == nil ? "Upkeep active · unlimited" : "Upkeep session active") : "Upkeep is off"
+        stateLabel?.stringValue = active ? (session.keepsDisplayAwake ? "Upkeep active · display awake" : session.deadline == nil ? "Upkeep active · unlimited" : "Upkeep session active") : "Upkeep is off"
         stateLabel?.textColor = active ? .systemOrange : .secondaryLabelColor
         startButton?.title = session.running ? "Stop Upkeep" : "Start Upkeep"
         enableButton?.title = eventTap == nil ? "Enable for all apps…" : "Enabled for all apps ✓"
@@ -231,7 +238,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         if session.running, let deadline = session.deadline {
             let remaining = max(0, Int(ceil(deadline.timeIntervalSinceNow)))
             item.button?.title = String(format: " %d:%02d", remaining / 60, remaining % 60)
-            item.button?.toolTip = "Upkeep active · \(remaining) seconds remaining" + (externalCount > 0 ? " · external caffeinate also running" : "")
+            item.button?.toolTip = "Upkeep active · \(remaining) seconds remaining" + (session.keepsDisplayAwake ? " · display awake" : "") + (externalCount > 0 ? " · external caffeinate also running" : "")
         } else if session.running {
             item.button?.title = " ∞"
             item.button?.toolTip = "Upkeep active · unlimited · double-Control to stop"
@@ -248,6 +255,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         menu.addItem(.separator())
         add(session.running ? "Stop Upkeep session" : "Start Upkeep · \(durationNumber(Double(seconds) / 60)) minutes", #selector(toggle(_:)))
         add("Start unlimited · ⌃I", #selector(startUnlimited(_:)))
+        add("Start timed + display awake · ⌃D", #selector(startDisplayAwake(_:)))
+        if session.keepsDisplayAwake { menu.addItem(NSMenuItem(title: "Display kept awake until this session ends", action: nil, keyEquivalent: "")) }
         menu.addItem(NSMenuItem(title: "Toggle: double-tap ⌃ Control", action: nil, keyEquivalent: ""))
         menu.addItem(.separator()); add("Settings…", #selector(showSettings(_:)))
         add("Quit Upkeep", #selector(quit(_:)))
@@ -264,6 +273,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     @objc func startUnlimited(_ sender: Any?) {
         guard !session.running || session.deadline != nil else { return }
         do { try session.start(seconds: nil) } catch {
+            let alert = NSAlert(); alert.messageText = "Couldn’t start caffeinate"; alert.informativeText = error.localizedDescription; alert.runModal()
+        }
+        scanExternal()
+    }
+    @objc func startDisplayAwake(_ sender: Any?) {
+        do { try session.start(seconds: seconds, keepDisplayAwake: true) } catch {
             let alert = NSAlert(); alert.messageText = "Couldn’t start caffeinate"; alert.informativeText = error.localizedDescription; alert.runModal()
         }
         scanExternal()
@@ -285,10 +300,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             durationUnit.addItems(withTitles: ["Minutes", "Hours"])
             durationUnit.target = self; durationUnit.action = #selector(changeDurationUnit(_:)); v.addSubview(durationUnit)
             v.addSubview(label("Global shortcut", NSRect(x: 28, y: 236, width: 170, height: 22)))
-            shortcutLabel = label("⌃ twice: toggle timed / stop\n⌃ ⇧: Settings\n⌃ I: start unlimited", NSRect(x: 220, y: 180, width: 210, height: 78), size: 12); v.addSubview(shortcutLabel)
+            shortcutLabel = label("⌃ twice: toggle timed / stop\n⌃ ⇧: Settings\n⌃ I: start unlimited\n⌃ D: timed + display awake", NSRect(x: 220, y: 174, width: 210, height: 84), size: 12); v.addSubview(shortcutLabel)
             enableButton = NSButton(title: "Enable for all apps…", target: self, action: #selector(enableShortcuts(_:)))
             enableButton!.frame = NSRect(x: 218, y: 126, width: 200, height: 30); enableButton!.bezelStyle = .rounded; v.addSubview(enableButton!)
-            let hint = label("Tap Control twice to stop either session type.", NSRect(x: 28, y: 90, width: 400, height: 25), size: 11); hint.textColor = .secondaryLabelColor; v.addSubview(hint)
+            let hint = label("Tap Control twice to stop any session.", NSRect(x: 28, y: 90, width: 400, height: 25), size: 11); hint.textColor = .secondaryLabelColor; v.addSubview(hint)
             permissionLabel = label("", NSRect(x: 28, y: 70, width: 395, height: 20), size: 11); permissionLabel!.textColor = .secondaryLabelColor; v.addSubview(permissionLabel!)
             errorLabel = label("", NSRect(x: 28, y: 44, width: 395, height: 23), size: 11); errorLabel.textColor = .systemRed; v.addSubview(errorLabel)
             let save = NSButton(title: "Save duration", target: self, action: #selector(saveDuration(_:))); save.frame = NSRect(x: 290, y: 16, width: 132, height: 32); save.bezelStyle = .rounded; v.addSubview(save)
@@ -385,6 +400,35 @@ if CommandLine.arguments.contains("--export-icon") {
     precondition(kill(timedPID, 0) == -1 && session.running && session.deadline == nil)
     session.stop()
     print("PASS: timed expiry, unlimited session, timed-to-unlimited replacement, restart, and cleanup")
+    func ownedAssertions(_ pid: Int32) throws -> String {
+        let command = Process(); let output = Pipe()
+        command.executableURL = URL(fileURLWithPath: "/usr/bin/pmset")
+        command.arguments = ["-g", "assertions"]; command.standardOutput = output
+        try command.run()
+        let data = output.fileHandleForReading.readDataToEndOfFile(); command.waitUntilExit()
+        precondition(command.terminationStatus == 0, "Could not inspect power assertions")
+        return String(decoding: data, as: UTF8.self).split(separator: "\n").filter { $0.contains("pid \(pid)(") }.joined(separator: "\n")
+    }
+    func verifyDisplayAssertions(_ pid: Int32) throws {
+        let limit = Date().addingTimeInterval(2)
+        while Date() < limit {
+            let assertions = try ownedAssertions(pid)
+            if assertions.contains("PreventUserIdleDisplaySleep") && assertions.contains("PreventUserIdleSystemSleep") { return }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        }
+        preconditionFailure("Display session must create both display and idle system sleep assertions")
+    }
+    try session.start(seconds: 3, keepDisplayAwake: true)
+    let displayPID = session.process!.processIdentifier
+    precondition(session.keepsDisplayAwake && session.process?.arguments == ["-di", "-t", "3"])
+    try verifyDisplayAssertions(displayPID)
+    let displayExpiry = Date().addingTimeInterval(5)
+    while session.running && Date() < displayExpiry { RunLoop.current.run(until: Date().addingTimeInterval(0.1)) }
+    RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+    precondition(!session.running && !session.keepsDisplayAwake && session.deadline == nil)
+    let expiredAssertions = try ownedAssertions(displayPID)
+    precondition(expiredAssertions.isEmpty, "Expired display assertions must be released")
+    print("PASS: actual macOS display + system assertions, timed display expiry and assertion cleanup")
     let application = NSApplication.shared
     application.setActivationPolicy(.accessory)
     let controller = AppDelegate()
@@ -443,6 +487,47 @@ if CommandLine.arguments.contains("--export-icon") {
     precondition(controller.window?.isVisible == true && controller.seconds == 5400)
     controller.window?.close()
     print("PASS: minutes default, fractional hours, unit conversion, save closes Settings, invalid input stays open")
+    controller.handleShortcutEvent(type: .keyDown, key: 2, flags: [.maskControl, .maskShift], time: 20)
+    controller.handleShortcutEvent(type: .keyDown, key: 2, flags: [], time: 20.1)
+    controller.handleShortcutEvent(type: .keyDown, key: 2, flags: [.maskControl, .maskAlternate], time: 20.2)
+    controller.handleShortcutEvent(type: .keyDown, key: 2, flags: [.maskControl, .maskCommand], time: 20.3)
+    drain()
+    precondition(!controller.session.running, "Only unmodified Control D may start display mode")
+    controller.handleShortcutEvent(type: .keyDown, key: 2, flags: .maskControl, time: 21)
+    drain()
+    precondition(controller.session.keepsDisplayAwake && controller.session.process?.arguments == ["-di", "-t", "5400"], "Control D must use the saved duration")
+    let shortcutDisplayPID = controller.session.process!.processIdentifier
+    try verifyDisplayAssertions(shortcutDisplayPID)
+    controller.refresh(); controller.menuWillOpen(controller.menu)
+    precondition(controller.item.button?.toolTip?.contains("display awake") == true)
+    precondition(controller.menu.items.contains { $0.title == "Display kept awake until this session ends" })
+    controller.handleShortcutEvent(type: .keyDown, key: 2, flags: .maskControl, time: 21.1, repeated: true)
+    drain()
+    precondition(controller.session.process?.processIdentifier == shortcutDisplayPID, "Held Control D must not restart the timer")
+    controlDouble(22)
+    precondition(!controller.session.running && !controller.session.keepsDisplayAwake && kill(shortcutDisplayPID, 0) == -1)
+    let stoppedAssertions = try ownedAssertions(shortcutDisplayPID)
+    precondition(stoppedAssertions.isEmpty, "Double Control must release display assertions")
+    controlDouble(23)
+    let plainPID = controller.session.process!.processIdentifier
+    precondition(!controller.session.keepsDisplayAwake && controller.session.process?.arguments == ["-t", "5400"])
+    controller.handleShortcutEvent(type: .keyDown, key: 2, flags: .maskControl, time: 24)
+    drain()
+    precondition(kill(plainPID, 0) == -1 && controller.session.keepsDisplayAwake, "Control D must replace the timed session")
+    let replacedDisplayPID = controller.session.process!.processIdentifier
+    controller.handleShortcutEvent(type: .keyDown, key: 34, flags: .maskControl, time: 25)
+    drain()
+    precondition(kill(replacedDisplayPID, 0) == -1 && !controller.session.keepsDisplayAwake && controller.session.deadline == nil)
+    let replacedAssertions = try ownedAssertions(replacedDisplayPID)
+    precondition(replacedAssertions.isEmpty, "Unlimited mode must release the old display assertion")
+    let replacedUnlimitedPID = controller.session.process!.processIdentifier
+    controller.handleShortcutEvent(type: .keyDown, key: 2, flags: .maskControl, time: 26)
+    drain()
+    precondition(kill(replacedUnlimitedPID, 0) == -1 && controller.session.keepsDisplayAwake && controller.session.deadline != nil)
+    try verifyDisplayAssertions(controller.session.process!.processIdentifier)
+    controller.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+    precondition(!controller.session.running && !controller.session.keepsDisplayAwake)
+    print("PASS: Control D saved duration, repeat/chord filtering, indicators, double Control stop, mode replacement and quit cleanup")
 } else {
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)

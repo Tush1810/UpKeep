@@ -10,6 +10,7 @@ Upkeep is a small native macOS menu bar app powered by Apple's `caffeinate` comm
 - Unlimited sessions that run until you stop them.
 - Duration settings in **minutes or hours**, including fractional values.
 - Global keyboard shortcuts for starting, stopping, and opening Settings.
+- A timed **display-awake** mode to keep the screen from going black through idle display sleep.
 - An amber coffee cup with a countdown or **∞** while active; an outlined cup while off.
 - Native Swift and AppKit, with no third-party dependencies.
 
@@ -88,12 +89,15 @@ Add **Upkeep.app** under **System Settings → General → Login Items → Open 
 | Double-tap **Control (⌃)** | Start a timed session when off; stop the current timed or unlimited session when active |
 | **Control + Shift (⌃ ⇧)** | Open Settings |
 | **Control + I (⌃ I)** | Start an unlimited session, or change the current timed session to unlimited |
+| **Control + D (⌃ D)** | Start a timed session that keeps both the Mac and display awake, using the saved duration |
 
 Double-tap Control with two quick press-and-release taps, no more than **450 ms** apart. Either Control key works. A long hold, another key or modifier, or a mouse click cancels the double-tap sequence. For Settings, press Control and Shift together; either order works.
 
 The shortcuts are currently fixed. The listener is passive, so a shortcut can also trigger the focused app's usual action.
 
 Pressing Control + I during an unlimited session leaves it running. Double-tap Control, choose **Stop Upkeep session** from the menu, or quit Upkeep to stop it.
+
+**Control + D** starts a fresh timed session with display sleep prevention. It replaces any current session and uses the same duration as double-Control. Holding the keys does not repeatedly restart the timer. The countdown remains amber, and the menu, tooltip, and Settings identify **display awake** mode. Double-Control stops it; its sleep prevention also ends when the timer expires or you quit Upkeep. Switching to Control + I releases display sleep prevention and starts the usual unlimited session.
 
 ### Change the duration
 
@@ -119,7 +123,7 @@ Your duration is remembered between launches and applies to the **next timed ses
 
 Hold **Command** and drag the icon to reposition it in the menu bar.
 
-Upkeep prevents **idle system sleep**. Display sleep and lid-close behavior still follow macOS settings. It starts `caffeinate -t <seconds>` for timed sessions and `caffeinate` for unlimited sessions. Other caffeinate processes appear separately in its menu and tooltip; Upkeep stops only its own process.
+Standard timed and unlimited sessions prevent **idle system sleep** and let the display sleep according to macOS settings. Control + D additionally prevents **idle display sleep**, using `caffeinate -di -t <seconds>`. Standard timed sessions use `caffeinate -t <seconds>`; unlimited sessions use `caffeinate`. These modes do not override lid-close behavior or explicit sleep/lock actions. Other caffeinate processes appear separately in the menu and tooltip; Upkeep stops only its own process.
 
 ## Update
 
@@ -167,7 +171,7 @@ The default branch is **dev**. After building, run the built-in checks:
 ./Upkeep.app/Contents/MacOS/Upkeep --self-test
 ```
 
-These checks cover duration conversion and validation, saving and closing Settings, timed expiry, unlimited sessions, session transitions, process cleanup, double-Control detection, and shortcut action routing. They briefly open a Settings window and restore the saved duration afterward.
+These checks cover duration conversion and validation, saving and closing Settings, timed expiry, unlimited sessions, session transitions, process cleanup, double-Control detection, and shortcut action routing. Display-awake checks inspect the actual macOS display and system power assertions, verify their release on timeout and stop, and check mode transitions, key-repeat filtering, and use of the saved duration. Tests briefly open a Settings window and restore the saved duration afterward.
 
 For an end-to-end global shortcut check, enable Input Monitoring and focus another app:
 
@@ -176,6 +180,7 @@ For an end-to-end global shortcut check, enable Input Monitoring and focus anoth
 3. Press Control + I and confirm **∞** appears; double-tap Control to stop it.
 4. Press Control + Shift and confirm Settings opens.
 5. Save a new duration, confirm Settings closes, and start another timed session to check the new countdown.
+6. Press Control + D and confirm the timed countdown and **display awake** status. Double-tap Control to stop it.
 
 Use a physical keyboard for these checks: synthetic input targeted at an app may not reach macOS's global event listener.
 
