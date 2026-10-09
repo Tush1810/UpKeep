@@ -18,7 +18,17 @@ func durationNumber(_ value: Double) -> String {
 enum SessionMode {
     case off, timed, unlimited, displayAwake
 
+    var title: String {
+        switch self {
+        case .off: return "Off"
+        case .timed: return "Timed"
+        case .unlimited: return "Infinite"
+        case .displayAwake: return "Timed + display"
+        }
+    }
+
     var color: NSColor {
+
         switch self {
         case .off: return .labelColor
         case .timed: return NSColor(srgbRed: 245 / 255.0, green: 166 / 255.0, blue: 35 / 255.0, alpha: 1)
@@ -63,8 +73,8 @@ enum SessionError: LocalizedError {
 }
 
 final class Session {
-
     var process: Process?
+    private var expiryTimer: Timer?
     var deadline: Date?
     var keepsDisplayAwake = false
     var changed: (() -> Void)?
@@ -73,21 +83,45 @@ final class Session {
         guard running else { return .off }
         return keepsDisplayAwake ? .displayAwake : deadline == nil ? .unlimited : .timed
     }
-    func start(seconds: Int?, keepDisplayAwake: Bool = false) throws {
+    func start(seconds: Int?, keepDisplayAwake: Bool = false, endAt: Date? = nil) throws {
         precondition(Thread.isMainThread, "Session changes must run on the main thread")
         try stop()
+        if let endAt, endAt <= Date() { return }
+        let timeout = endAt.map { Int(ceil($0.timeIntervalSinceNow)) } ?? seconds
         let child = Process()
         child.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate")
-        child.arguments = (keepDisplayAwake ? ["-di"] : []) + (seconds.map { ["-t", String($0)] } ?? []) + ["-w", String(ProcessInfo.processInfo.processIdentifier)]
+        child.arguments = (keepDisplayAwake ? ["-di"] : []) + (timeout.map { ["-t", String(max(1, $0))] } ?? []) + ["-w", String(ProcessInfo.processInfo.processIdentifier)]
         child.terminationHandler = { [weak self, weak child] _ in
             DispatchQueue.main.async {
                 guard let self, self.process === child else { return }
+                self.expiryTimer?.invalidate(); self.expiryTimer = nil
                 self.process = nil; self.deadline = nil; self.keepsDisplayAwake = false; self.changed?()
             }
         }
         try child.run()
-        process = child; deadline = seconds.map { Date().addingTimeInterval(Double($0)) }
-        keepsDisplayAwake = keepDisplayAwake; changed?()
+        process = child; deadline = seconds.map { endAt ?? Date().addingTimeInterval(Double($0)) }
+        keepsDisplayAwake = keepDisplayAwake
+        if let deadline {
+            let timer = Timer(fire: deadline, interval: 0, repeats: false) { [weak self, weak child] _ in
+                guard let self, self.process === child else { return }
+                try? self.stop()
+            }
+            expiryTimer = timer; RunLoop.main.add(timer, forMode: .common)
+        }
+        changed?()
+    }
+    func select(_ target: SessionMode, seconds: Int, restart: Bool = false) throws {
+        precondition(Thread.isMainThread, "Session changes must run on the main thread")
+        if target == .off { try stop(); return }
+        if target == mode && !restart { return }
+        if target == .unlimited { try start(seconds: nil); return }
+        if running, let currentDeadline = deadline, !restart {
+            let remaining = currentDeadline.timeIntervalSinceNow
+            guard remaining > 0 else { try stop(); return }
+            try start(seconds: Int(ceil(remaining)), keepDisplayAwake: target == .displayAwake, endAt: currentDeadline)
+        } else {
+            try start(seconds: seconds, keepDisplayAwake: target == .displayAwake)
+        }
     }
     func stop() throws {
         precondition(Thread.isMainThread, "Session changes must run on the main thread")
@@ -101,6 +135,7 @@ final class Session {
             }
             guard !child.isRunning else { throw SessionError.couldNotStop }
         }
+        expiryTimer?.invalidate(); expiryTimer = nil
         process = nil; deadline = nil; keepsDisplayAwake = false
         changed?()
     }
@@ -140,6 +175,7 @@ struct DoubleControlDetector {
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate {
     let session = Session()
+    var preferences = UserDefaults.standard
     var item: NSStatusItem!
     let menu = NSMenu()
     var timer: Timer?
@@ -161,11 +197,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     var stateLabel: NSTextField?
     var settingsIcon: NSImageView?
     var startButton: NSButton?
-    var seconds: Int { UserDefaults.standard.integer(forKey: "duration") }
+    var seconds: Int { preferences.integer(forKey: "duration") }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        UserDefaults.standard.register(defaults: ["duration": 7200])
-        if seconds < 1 || seconds > 31_536_000 { UserDefaults.standard.set(7200, forKey: "duration") }
+        preferences.register(defaults: ["duration": 7200])
+        if seconds < 1 || seconds > 31_536_000 { preferences.set(7200, forKey: "duration") }
         item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.autosaveName = "BrewCoffee"
         menu.delegate = self; item.menu = menu
@@ -290,43 +326,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
     func menuWillOpen(_ menu: NSMenu) {
         menu.removeAllItems()
-        let heading = NSMenuItem(title: session.running ? "☕ Upkeep is keeping you awake" : "☕ Upkeep is off", action: nil, keyEquivalent: "")
-        menu.addItem(heading)
+        menu.addItem(NSMenuItem(title: "Upkeep · \(session.mode.title)", action: nil, keyEquivalent: ""))
+        if session.running {
+            let detail = session.deadline.map { "\(Int(ceil(max(0, $0.timeIntervalSinceNow) / 60))) minutes remaining" } ?? "No time limit"
+            menu.addItem(NSMenuItem(title: detail, action: nil, keyEquivalent: ""))
+        }
         if externalCount > 0 { menu.addItem(NSMenuItem(title: "\(externalCount) external session(s) · managed elsewhere", action: nil, keyEquivalent: "")) }
         menu.addItem(.separator())
-        add(session.running ? "Stop Upkeep session" : "Start Upkeep · \(durationNumber(Double(seconds) / 60)) minutes", #selector(toggle(_:)))
-        add("Start unlimited · ⌃I", #selector(startUnlimited(_:)))
-        add("Start timed + display awake · ⌃D", #selector(startDisplayAwake(_:)))
+        for (mode, action) in [(SessionMode.timed, #selector(startTimed(_:))), (.unlimited, #selector(startUnlimited(_:))), (.displayAwake, #selector(startDisplayAwake(_:)))] {
+            let entry = add(mode.title, action)
+            entry.state = session.mode == mode ? .on : .off
+        }
         if session.keepsDisplayAwake { menu.addItem(NSMenuItem(title: "Display kept awake until this session ends", action: nil, keyEquivalent: "")) }
+        menu.addItem(.separator())
+        if session.running, session.deadline != nil {
+            add("Restart timer · \(durationNumber(Double(seconds) / 60)) minutes", #selector(restartTimer(_:)))
+        }
+        if session.running { add("Stop Upkeep", #selector(stopSession(_:))) }
         menu.addItem(NSMenuItem(title: "Toggle: double-tap ⌃ Control", action: nil, keyEquivalent: ""))
         menu.addItem(.separator()); add("Settings…", #selector(showSettings(_:)))
         add("Quit Upkeep", #selector(quit(_:)))
     }
-    func add(_ title: String, _ action: Selector) { let entry = NSMenuItem(title: title, action: action, keyEquivalent: ""); entry.target = self; menu.addItem(entry) }
+    @discardableResult
+    func add(_ title: String, _ action: Selector) -> NSMenuItem {
+        let entry = NSMenuItem(title: title, action: action, keyEquivalent: ""); entry.target = self; menu.addItem(entry); return entry
+    }
     func showSessionError(_ error: Error) {
         let alert = NSAlert(); alert.messageText = "Couldn’t change Upkeep session"; alert.informativeText = error.localizedDescription; alert.runModal()
     }
-    @objc func toggle(_ sender: Any?) {
-
-        if session.running { do { try session.stop() } catch { showSessionError(error) } } else {
-            do { try session.start(seconds: seconds) } catch {
-                let alert = NSAlert(); alert.messageText = "Couldn’t start caffeinate"; alert.informativeText = error.localizedDescription; alert.runModal()
-            }
-        }
+    func selectMode(_ mode: SessionMode, restart: Bool = false) {
+        do { try session.select(mode, seconds: seconds, restart: restart) } catch { showSessionError(error) }
         scanExternal()
     }
-    @objc func startUnlimited(_ sender: Any?) {
-        guard !session.running || session.deadline != nil else { return }
-        do { try session.start(seconds: nil) } catch {
-            let alert = NSAlert(); alert.messageText = "Couldn’t start caffeinate"; alert.informativeText = error.localizedDescription; alert.runModal()
-        }
-        scanExternal()
-    }
-    @objc func startDisplayAwake(_ sender: Any?) {
-        do { try session.start(seconds: seconds, keepDisplayAwake: true) } catch {
-            let alert = NSAlert(); alert.messageText = "Couldn’t start caffeinate"; alert.informativeText = error.localizedDescription; alert.runModal()
-        }
-        scanExternal()
+    @objc func toggle(_ sender: Any?) { selectMode(session.running ? .off : .timed) }
+    @objc func startTimed(_ sender: Any?) { selectMode(.timed) }
+    @objc func startUnlimited(_ sender: Any?) { selectMode(.unlimited) }
+    @objc func startDisplayAwake(_ sender: Any?) { selectMode(.displayAwake) }
+    @objc func stopSession(_ sender: Any?) { selectMode(.off) }
+    @objc func restartTimer(_ sender: Any?) {
+        guard session.running, session.deadline != nil else { return }
+        selectMode(session.mode, restart: true)
     }
     func label(_ text: String, _ frame: NSRect, size: CGFloat = 13) -> NSTextField {
         let view = NSTextField(labelWithString: text); view.frame = frame; view.font = .systemFont(ofSize: size); return view
@@ -363,7 +402,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         guard let value = durationSeconds(durationField.stringValue, unit: durationUnit.indexOfSelectedItem) else {
             errorLabel.stringValue = "Enter a positive duration between 1 second and 1 year."; return
         }
-        UserDefaults.standard.set(value, forKey: "duration")
+        preferences.set(value, forKey: "duration")
         window?.close()
     }
     @objc func changeDurationUnit(_ sender: Any?) {
@@ -463,7 +502,31 @@ if CommandLine.arguments.contains("--lifecycle-test-owner") {
         precondition(command.terminationStatus == 0, "Could not inspect power assertions")
         return String(decoding: data, as: UTF8.self).split(separator: "\n").filter { $0.contains("pid \(pid)(") }.joined(separator: "\n")
     }
+    func stubbornChild() throws -> Process {
+        let child = Process(); let output = Pipe()
+        child.executableURL = URL(fileURLWithPath: "/bin/sh")
+        child.arguments = ["-c", "trap '' TERM; printf ready; while :; do :; done"]
+        child.standardOutput = output
+        try child.run()
+        precondition(String(decoding: output.fileHandleForReading.availableData, as: UTF8.self) == "ready")
+        return child
+    }
+    func freezeChild(_ pid: Int32) throws {
+
+        precondition(kill(pid, SIGSTOP) == 0)
+        let limit = ProcessInfo.processInfo.systemUptime + 1
+        while ProcessInfo.processInfo.systemUptime < limit {
+            let ps = Process(); let output = Pipe()
+            ps.executableURL = URL(fileURLWithPath: "/bin/ps"); ps.arguments = ["-o", "state=", "-p", String(pid)]; ps.standardOutput = output
+            try ps.run()
+            let data = output.fileHandleForReading.readDataToEndOfFile(); ps.waitUntilExit()
+            if String(decoding: data, as: UTF8.self).contains("T") { return }
+            Thread.sleep(forTimeInterval: 0.005)
+        }
+        preconditionFailure("Fixture child did not become suspended")
+    }
     func verifyDisplayAssertions(_ pid: Int32) throws {
+
         let limit = Date().addingTimeInterval(2)
         while Date() < limit {
             let assertions = try ownedAssertions(pid)
@@ -486,8 +549,11 @@ if CommandLine.arguments.contains("--lifecycle-test-owner") {
     let application = NSApplication.shared
     application.setActivationPolicy(.accessory)
     let controller = AppDelegate()
+    let testDomain = "local.upkeep.tests." + UUID().uuidString
+    controller.preferences = UserDefaults(suiteName: testDomain)!
+    defer { controller.preferences.removePersistentDomain(forName: testDomain) }
     controller.item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-    UserDefaults.standard.register(defaults: ["duration": 7200])
+    controller.preferences.register(defaults: ["duration": 7200])
     func drain() { RunLoop.current.run(until: Date().addingTimeInterval(0.15)) }
     func controlDouble(_ start: Double) {
         for (offset, down) in [(0.0, true), (0.1, false), (0.2, true), (0.3, false)] {
@@ -522,10 +588,10 @@ if CommandLine.arguments.contains("--lifecycle-test-owner") {
     precondition(controller.window?.isVisible == true, "Shift then right Control must open Settings")
     controller.window?.close()
     print("PASS: Control I unlimited, double Control start/stop, Control Shift Settings in either order, no repeated opening")
-    let savedDuration = UserDefaults.standard.object(forKey: "duration")
+    let savedDuration = controller.preferences.object(forKey: "duration")
     defer {
-        if let savedDuration { UserDefaults.standard.set(savedDuration, forKey: "duration") }
-        else { UserDefaults.standard.removeObject(forKey: "duration") }
+        if let savedDuration { controller.preferences.set(savedDuration, forKey: "duration") }
+        else { controller.preferences.removeObject(forKey: "duration") }
     }
     controller.showSettings(nil)
     controller.durationUnit.selectItem(at: 1)
@@ -582,7 +648,83 @@ if CommandLine.arguments.contains("--lifecycle-test-owner") {
     controller.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
     precondition(!controller.session.running && !controller.session.keepsDisplayAwake)
     print("PASS: Control D saved duration, repeat/chord filtering, indicators, double Control stop, mode replacement and quit cleanup")
+    // Activate the same NSMenuItems used by mouse selection for every mode pair.
+    func menuAction(_ title: String) {
+        controller.menuWillOpen(controller.menu)
+        guard let entry = controller.menu.items.first(where: { $0.title == title }), let action = entry.action else { preconditionFailure("Missing menu action: \(title)") }
+        precondition(application.sendAction(action, to: entry.target, from: entry))
+        controller.refresh()
+    }
+    let modes: [SessionMode] = [.timed, .unlimited, .displayAwake]
+    for source in [SessionMode.off] + modes {
+        for target in modes {
+            try controller.session.stop()
+            if source != .off { try controller.session.start(seconds: source == .unlimited ? nil : 5, keepDisplayAwake: source == .displayAwake) }
+            let previousPID = controller.session.process?.processIdentifier
+            let previousDeadline = controller.session.deadline
+            menuAction(target.title)
+            precondition(controller.session.mode == target, "Menu selected the wrong mode")
+            if source == target {
+                precondition(controller.session.process?.processIdentifier == previousPID && controller.session.deadline == previousDeadline, "Selecting the current mode must be a no-op")
+            } else if source != .off, source != .unlimited, target != .unlimited {
+                precondition(controller.session.deadline == previousDeadline, "Timed mode switch must preserve the deadline")
+            } else if target != .unlimited {
+                precondition(abs(controller.session.deadline!.timeIntervalSinceNow - Double(controller.seconds)) < 1, "A fresh timer must use the saved duration")
+            } else { precondition(controller.session.deadline == nil) }
+            if let previousPID, source != target { precondition(kill(previousPID, 0) == -1, "Replaced child survived") }
+            controller.menuWillOpen(controller.menu)
+            let checked = controller.menu.items.filter { $0.state == .on }
+            precondition(checked.count == 1 && checked[0].title == target.title)
+            precondition(modes.allSatisfy { mode in controller.menu.items.contains { $0.title == mode.title && $0.action != nil } })
+            precondition(controller.menu.items.contains { $0.title == "Stop Upkeep" })
+            precondition(controller.menu.items.contains { $0.title.hasPrefix("Restart timer") } == (target != .unlimited))
+            precondition(controller.stateLabel?.textColor == target.color && controller.item.button?.image?.isTemplate == false)
+            if target == .unlimited { precondition(controller.item.button?.title == " ∞") }
+            if target == .displayAwake { try verifyDisplayAssertions(controller.session.process!.processIdentifier) }
+            menuAction("Stop Upkeep")
+            precondition(controller.session.mode == .off && controller.item.button?.image?.isTemplate == true)
+        }
+    }
+    controller.menuWillOpen(controller.menu)
+    precondition(!controller.menu.items.contains { $0.state == .on || $0.title == "Stop Upkeep" || $0.title.hasPrefix("Restart timer") })
+    try controller.session.start(seconds: 5, keepDisplayAwake: true)
+    let restartPID = controller.session.process!.processIdentifier
+    menuAction("Restart timer · 90 minutes")
+    precondition(controller.session.mode == .displayAwake && kill(restartPID, 0) == -1)
+    precondition(abs(controller.session.deadline!.timeIntervalSinceNow - 5400) < 1)
+    let shortcutDeadline = controller.session.deadline
+    let shortcutPID = controller.session.process!.processIdentifier
+    controller.handleShortcutEvent(type: .keyDown, key: 2, flags: .maskControl, time: 30)
+    drain()
+    precondition(controller.session.deadline == shortcutDeadline && controller.session.process?.processIdentifier == shortcutPID, "Control D on the same mode must not reset time")
+    controller.startTimed(nil)
+    precondition(controller.session.deadline == shortcutDeadline && !controller.session.keepsDisplayAwake)
+    controller.handleShortcutEvent(type: .keyDown, key: 2, flags: .maskControl, time: 31)
+    drain()
+    precondition(controller.session.deadline == shortcutDeadline && controller.session.keepsDisplayAwake, "Control D must preserve a timed deadline")
+    try controller.session.stop()
+    try controller.session.start(seconds: 2)
+    RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+    let expiryDeadline = controller.session.deadline
+    menuAction("Timed + display")
+    precondition(controller.session.deadline == expiryDeadline)
+    let expiryLimit = Date().addingTimeInterval(3)
+    while controller.session.running && Date() < expiryLimit { drain() }
+    precondition(!controller.session.running, "Preserved timer must expire")
+    precondition(Date().timeIntervalSince(expiryDeadline!) < 0.4, "Switching must not extend the original expiry by rounded caffeinate seconds")
+    try controller.session.start(seconds: 2)
+    controller.session.deadline = Date().addingTimeInterval(-1)
+    controller.startDisplayAwake(nil)
+    precondition(!controller.session.running, "An elapsed timer must not be revived by switching")
+    let expiringChild = try stubbornChild()
+    controller.session.process = expiringChild
+    controller.session.deadline = Date().addingTimeInterval(0.02)
+    controller.startDisplayAwake(nil)
+    precondition(!controller.session.running && !expiringChild.isRunning, "A timer that expires during stop must not start a replacement")
+    precondition(expiringChild.terminationReason == .uncaughtSignal && expiringChild.terminationStatus == SIGKILL, "Stop must escalate when SIGTERM is ignored")
+    print("PASS: all 12 menu mode selections, checked states, same-mode no-op, saved-duration starts, preserved timers, explicit restart, shortcuts and near-expiry cleanup")
     // Exercise the actual OS owner watcher, including death immediately after spawn.
+
     for signal in [SIGTERM, SIGKILL] {
         for mode in ["timed", "unlimited", "display"] {
             for attempt in 0..<3 {
@@ -607,7 +749,7 @@ if CommandLine.arguments.contains("--lifecycle-test-owner") {
     try unrelated.run()
     try session.start(seconds: nil)
     let frozenPID = session.process!.processIdentifier
-    kill(frozenPID, SIGSTOP)
+    try freezeChild(frozenPID)
     let stopStart = ProcessInfo.processInfo.systemUptime
     try session.stop()
     precondition(ProcessInfo.processInfo.systemUptime - stopStart < 1.5, "Stopping a frozen child exceeded the bound")
