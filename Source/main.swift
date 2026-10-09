@@ -432,7 +432,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
     @discardableResult
     func add(_ title: String, _ action: Selector) -> NSMenuItem {
-        let entry = NSMenuItem(title: title, action: action, keyEquivalent: ""); entry.target = self; menu.addItem(entry); return entry
+        let entry = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        if #available(macOS 27.0, *) { entry.preferredImageVisibility = .visible }
+        entry.target = self; menu.addItem(entry); return entry
     }
     func showSessionError(_ error: Error) {
         let alert = NSAlert(); alert.messageText = "Couldn’t change Upkeep session"; alert.informativeText = error.localizedDescription; alert.runModal()
@@ -762,6 +764,12 @@ if CommandLine.arguments.contains("--lifecycle-test-owner") {
     // Activate the same NSMenuItems used by mouse selection for every mode pair.
     func menuAction(_ title: String) {
         controller.menuWillOpen(controller.menu)
+        for item in controller.menu.items where item.action != nil {
+            precondition(item.image != nil, "Menu action must have its icon")
+            if #available(macOS 27.0, *) {
+                precondition(item.preferredImageVisibility == .visible, "Menu icons must remain visible on macOS 27")
+            }
+        }
         guard let entry = controller.menu.items.first(where: { $0.title == title }), let action = entry.action else { preconditionFailure("Missing menu action: \(title)") }
         precondition(application.sendAction(action, to: entry.target, from: entry))
         controller.refresh()
