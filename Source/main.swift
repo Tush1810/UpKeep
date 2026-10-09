@@ -15,6 +15,29 @@ func durationNumber(_ value: Double) -> String {
     return text
 }
 
+func remainingTime(_ seconds: Int, compact: Bool) -> String {
+    let value = max(1, seconds)
+    if value < 60 { return compact ? "\(value)s" : "\(value) \(value == 1 ? "second" : "seconds") remaining" }
+    if value < 3600 {
+        return compact ? String(format: "%d:%02d", value / 60, value % 60) : "\(value / 60)m \(value % 60)s remaining"
+    }
+    if value < 86400 {
+        let hours = value / 3600, minutes = value % 3600 / 60
+        return compact ? "\(hours)h \(minutes)m" : "\(hours)h \(minutes)m \(value % 60)s remaining"
+    }
+    let days = value / 86400, hours = value % 86400 / 3600
+    return compact ? "\(days)d \(hours)h" : "\(days)d \(hours)h \(value % 3600 / 60)m remaining"
+}
+
+func sessionEnd(_ deadline: Date, now: Date = Date(), calendar: Calendar = .current) -> String {
+    let formatter = DateFormatter()
+    formatter.calendar = calendar
+    formatter.timeZone = calendar.timeZone
+    formatter.timeStyle = .short
+    formatter.dateStyle = calendar.isDate(deadline, inSameDayAs: now) ? .none : .medium
+    return "Ends at \(formatter.string(from: deadline))"
+}
+
 enum SessionMode {
     case off, timed, unlimited, displayAwake
 
@@ -74,17 +97,23 @@ final class MenuStatusCard: NSView {
     let modeLabel = NSTextField(labelWithString: "Off")
     let countdown = NSTextField(labelWithString: "Ready when you are")
     let detail = NSTextField(labelWithString: "")
+    let endLabel = NSTextField(labelWithString: "")
     private var mode: SessionMode = .off
     init() {
-        super.init(frame: NSRect(x: 0, y: 0, width: 300, height: 122))
-        brand.frame = NSRect(x: 66, y: 84, width: 210, height: 22)
+        super.init(frame: NSRect(x: 0, y: 0, width: 340, height: 144))
+        coffee.frame.origin.y += 22
+        brand.frame = NSRect(x: 66, y: 106, width: 252, height: 22)
         brand.font = .systemFont(ofSize: 17, weight: .semibold)
-        modeLabel.frame = NSRect(x: 66, y: 65, width: 210, height: 17)
+        modeLabel.frame = NSRect(x: 66, y: 87, width: 252, height: 17)
         modeLabel.font = .systemFont(ofSize: 11, weight: .semibold)
-        countdown.frame = NSRect(x: 22, y: 31, width: 256, height: 27)
-        detail.frame = NSRect(x: 22, y: 11, width: 256, height: 17)
+        countdown.frame = NSRect(x: 22, y: 53, width: 296, height: 27)
+        countdown.cell?.wraps = false
+        countdown.cell?.isScrollable = false
+        endLabel.frame = NSRect(x: 22, y: 31, width: 296, height: 17)
+        endLabel.font = .systemFont(ofSize: 11); endLabel.textColor = .secondaryLabelColor
+        detail.frame = NSRect(x: 22, y: 11, width: 296, height: 17)
         detail.font = .systemFont(ofSize: 11); detail.textColor = .secondaryLabelColor
-        for view in [coffee, brand, modeLabel, countdown, detail] { addSubview(view) }
+        for view in [coffee, brand, modeLabel, countdown, endLabel, detail] { addSubview(view) }
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
     func update(mode: SessionMode, deadline: Date?, seconds: Int) {
@@ -92,13 +121,15 @@ final class MenuStatusCard: NSView {
         coffee.image = coffeeIcon(mode: mode, size: 30)
         modeLabel.stringValue = mode.title.uppercased()
         modeLabel.textColor = mode == .off ? .secondaryLabelColor : mode.color
-        countdown.font = mode == .off ? .systemFont(ofSize: 17, weight: .medium) : .monospacedDigitSystemFont(ofSize: 23, weight: .semibold)
+        countdown.font = mode == .off ? .systemFont(ofSize: 17, weight: .medium) : .monospacedDigitSystemFont(ofSize: 20, weight: .semibold)
+        endLabel.stringValue = ""
         if mode == .off {
             countdown.stringValue = "Ready when you are"
             detail.stringValue = "Default session · \(durationNumber(Double(seconds) / 60)) min"
         } else if let deadline {
-            let remaining = max(0, Int(ceil(deadline.timeIntervalSinceNow)))
-            countdown.stringValue = String(format: "%d:%02d remaining", remaining / 60, remaining % 60)
+            let remaining = max(1, Int(ceil(deadline.timeIntervalSinceNow)))
+            countdown.stringValue = remainingTime(remaining, compact: false)
+            endLabel.stringValue = sessionEnd(deadline)
             detail.stringValue = mode == .displayAwake ? "Mac + display stay awake" : "Mac stays awake · display can sleep"
         } else {
             countdown.stringValue = "∞  No time limit"
@@ -358,9 +389,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         item.button?.image = coffeeIcon(mode: session.mode)
         settingsIcon?.image = coffeeIcon(mode: session.mode, size: 48)
         if session.running, let deadline = session.deadline {
-            let remaining = max(0, Int(ceil(deadline.timeIntervalSinceNow)))
-            item.button?.title = String(format: " %d:%02d", remaining / 60, remaining % 60)
-            item.button?.toolTip = "Upkeep active · \(remaining) seconds remaining" + (session.keepsDisplayAwake ? " · display awake" : "") + (externalCount > 0 ? " · external caffeinate also running" : "")
+            let remaining = max(1, Int(ceil(deadline.timeIntervalSinceNow)))
+            item.button?.title = " " + remainingTime(remaining, compact: true)
+            item.button?.toolTip = "Upkeep active · " + remainingTime(remaining, compact: false) + " · " + sessionEnd(deadline) + (session.keepsDisplayAwake ? " · display awake" : "") + (externalCount > 0 ? " · external caffeinate also running" : "")
         } else if session.running {
             item.button?.title = " ∞"
             item.button?.toolTip = "Upkeep active · unlimited · double-Control to stop"
@@ -493,6 +524,34 @@ if CommandLine.arguments.contains("--lifecycle-test-owner") {
     let bitmap = NSBitmapImageRep(data: image.tiffRepresentation!)!
     try bitmap.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: CommandLine.arguments.last!))
 } else if CommandLine.arguments.contains("--self-test") {
+    for (seconds, compact, detailed) in [
+        (0, "1s", "1 second remaining"), (1, "1s", "1 second remaining"),
+        (59, "59s", "59 seconds remaining"), (60, "1:00", "1m 0s remaining"),
+        (3599, "59:59", "59m 59s remaining"), (3600, "1h 0m", "1h 0m 0s remaining"),
+        (5420, "1h 30m", "1h 30m 20s remaining"), (86399, "23h 59m", "23h 59m 59s remaining"),
+        (86400, "1d 0h", "1d 0h 0m remaining"), (94500, "1d 2h", "1d 2h 15m remaining"),
+        (31_536_000, "365d 0h", "365d 0h 0m remaining")
+    ] {
+        precondition(remainingTime(seconds, compact: true) == compact)
+        precondition(remainingTime(seconds, compact: false) == detailed)
+        let card = MenuStatusCard()
+        let deadline = Date().addingTimeInterval(Double(max(1, seconds)))
+        card.update(mode: .displayAwake, deadline: deadline, seconds: seconds)
+        precondition(card.countdown.stringValue == detailed && card.endLabel.stringValue.hasPrefix("Ends at "))
+        let width = (detailed as NSString).size(withAttributes: [.font: card.countdown.font!]).width
+        precondition(width <= card.countdown.frame.width - 6, "Countdown must fit the status card")
+        card.update(mode: .unlimited, deadline: nil, seconds: seconds)
+        precondition(card.endLabel.stringValue.isEmpty && card.countdown.stringValue == "∞  No time limit")
+    }
+    var endCalendar = Calendar(identifier: .gregorian)
+    endCalendar.timeZone = TimeZone(secondsFromGMT: 0)!
+    let endNow = endCalendar.date(from: DateComponents(year: 2026, month: 10, day: 10, hour: 23))!
+    let endToday = endNow.addingTimeInterval(1800), endTomorrow = endNow.addingTimeInterval(7200)
+    let endFormatter = DateFormatter(); endFormatter.calendar = endCalendar; endFormatter.timeZone = endCalendar.timeZone; endFormatter.timeStyle = .short
+    precondition(sessionEnd(endToday, now: endNow, calendar: endCalendar) == "Ends at " + endFormatter.string(from: endToday))
+    endFormatter.dateStyle = .medium
+    precondition(sessionEnd(endTomorrow, now: endNow, calendar: endCalendar) == "Ends at " + endFormatter.string(from: endTomorrow))
+    print("PASS: countdown boundaries, active minimum, status-card text fit, infinite transition and end-date rollover")
     precondition(durationSeconds("60", unit: 0) == 3600)
     precondition(durationSeconds("1.5", unit: 1) == 5400)
     precondition(durationSeconds("0.5", unit: 0) == 30)

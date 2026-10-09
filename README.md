@@ -140,6 +140,17 @@ Your duration is remembered between launches and applies to the **next timed sta
 
 The Settings coffee cup and active status text use the same mode color. Countdowns, **∞**, tooltips, and existing status labels remain available alongside the colors.
 
+The menu bar keeps the countdown compact; the dropdown shows more detail:
+
+| Time remaining | Menu bar | Dropdown |
+| --- | --- | --- |
+| Under 1 minute | `45s` | `45 seconds remaining` |
+| 1–59 minutes | `12:34` | `12m 34s remaining` |
+| 1–under 24 hours | `1h 30m` | `1h 30m 20s remaining` |
+| 24 hours or more | `1d 2h` | `1d 2h 15m remaining` |
+
+At exactly one hour the menu bar shows `1h 0m`; at exactly 24 hours it shows `1d 0h`. An active countdown shows at least `1s` before returning to off. The dropdown and tooltip also show **Ends at**, using your local time and including the date when the session ends on another day. Infinite sessions continue to show **∞** without an end time.
+
 Hold **Command** and drag the icon to reposition it in the menu bar.
 
 Standard timed and unlimited sessions prevent **idle system sleep** and let the display sleep according to macOS settings. Control + D additionally prevents **idle display sleep**, using `caffeinate -di -t <seconds>`. Standard timed sessions use `caffeinate -t <seconds>`; unlimited sessions use `caffeinate`. These modes do not override lid-close behavior or explicit sleep/lock actions. Each command also includes `-w <Upkeep PID>` so it ends when its owning app exits, including a force-quit. Other caffeinate processes appear separately in the menu and tooltip; Upkeep stops only its own process.
