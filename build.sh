@@ -3,7 +3,7 @@ set -eu
 cd "${0:A:h}"
 APP="$PWD/Upkeep.app"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-xcrun swiftc -swift-version 5 -O Source/main.swift -o "$APP/Contents/MacOS/Upkeep" -framework AppKit -framework Carbon
+xcrun swiftc -target "$(uname -m)-apple-macosx13.0" -swift-version 5 -O Source/main.swift -o "$APP/Contents/MacOS/Upkeep" -framework AppKit -framework Carbon
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
