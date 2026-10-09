@@ -134,14 +134,12 @@ final class Session {
         guard running else { return .off }
         return keepsDisplayAwake ? .displayAwake : deadline == nil ? .unlimited : .timed
     }
-    func start(seconds: Int?, keepDisplayAwake: Bool = false, endAt: Date? = nil) throws {
+    func start(seconds: Int?, keepDisplayAwake: Bool = false) throws {
         precondition(Thread.isMainThread, "Session changes must run on the main thread")
         try stop()
-        if let endAt, endAt <= Date() { return }
-        let timeout = endAt.map { Int(ceil($0.timeIntervalSinceNow)) } ?? seconds
         let child = Process()
         child.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate")
-        child.arguments = (keepDisplayAwake ? ["-di"] : []) + (timeout.map { ["-t", String(max(1, $0))] } ?? []) + ["-w", String(ProcessInfo.processInfo.processIdentifier)]
+        child.arguments = (keepDisplayAwake ? ["-di"] : []) + (seconds.map { ["-t", String(max(1, $0))] } ?? []) + ["-w", String(ProcessInfo.processInfo.processIdentifier)]
         child.terminationHandler = { [weak self, weak child] _ in
             DispatchQueue.main.async {
                 guard let self, self.process === child else { return }
@@ -150,7 +148,7 @@ final class Session {
             }
         }
         try child.run()
-        process = child; deadline = seconds.map { endAt ?? Date().addingTimeInterval(Double($0)) }
+        process = child; deadline = seconds.map { Date().addingTimeInterval(Double($0)) }
         keepsDisplayAwake = keepDisplayAwake
         if let deadline {
             let timer = Timer(fire: deadline, interval: 0, repeats: false) { [weak self, weak child] _ in
@@ -166,13 +164,7 @@ final class Session {
         if target == .off { try stop(); return }
         if target == mode && !restart { return }
         if target == .unlimited { try start(seconds: nil); return }
-        if running, let currentDeadline = deadline, !restart {
-            let remaining = currentDeadline.timeIntervalSinceNow
-            guard remaining > 0 else { try stop(); return }
-            try start(seconds: Int(ceil(remaining)), keepDisplayAwake: target == .displayAwake, endAt: currentDeadline)
-        } else {
-            try start(seconds: seconds, keepDisplayAwake: target == .displayAwake)
-        }
+        try start(seconds: seconds, keepDisplayAwake: target == .displayAwake)
     }
     func stop() throws {
         precondition(Thread.isMainThread, "Session changes must run on the main thread")
@@ -726,8 +718,7 @@ if CommandLine.arguments.contains("--lifecycle-test-owner") {
             precondition(controller.session.mode == target, "Menu selected the wrong mode")
             if source == target {
                 precondition(controller.session.process?.processIdentifier == previousPID && controller.session.deadline == previousDeadline, "Selecting the current mode must be a no-op")
-            } else if source != .off, source != .unlimited, target != .unlimited {
-                precondition(controller.session.deadline == previousDeadline, "Timed mode switch must preserve the deadline")
+
             } else if target != .unlimited {
                 precondition(abs(controller.session.deadline!.timeIntervalSinceNow - Double(controller.seconds)) < 1, "A fresh timer must use the saved duration")
             } else { precondition(controller.session.deadline == nil) }
@@ -758,31 +749,44 @@ if CommandLine.arguments.contains("--lifecycle-test-owner") {
     drain()
     precondition(controller.session.deadline == shortcutDeadline && controller.session.process?.processIdentifier == shortcutPID, "Control D on the same mode must not reset time")
     controller.startTimed(nil)
-    precondition(controller.session.deadline == shortcutDeadline && !controller.session.keepsDisplayAwake)
+    precondition(controller.session.deadline != shortcutDeadline && !controller.session.keepsDisplayAwake)
+    precondition(abs(controller.session.deadline!.timeIntervalSinceNow - 5400) < 1)
+    let ordinaryTimedDeadline = controller.session.deadline
     controller.handleShortcutEvent(type: .keyDown, key: 2, flags: .maskControl, time: 31)
     drain()
-    precondition(controller.session.deadline == shortcutDeadline && controller.session.keepsDisplayAwake, "Control D must preserve a timed deadline")
+    precondition(controller.session.deadline != ordinaryTimedDeadline && controller.session.keepsDisplayAwake, "Control D must refresh the timed deadline")
+    precondition(abs(controller.session.deadline!.timeIntervalSinceNow - 5400) < 1)
     try controller.session.stop()
-    try controller.session.start(seconds: 2)
+    // A short old timer must not expire the replacement after a mode switch.
+    controller.preferences.set(2, forKey: "duration")
+    try controller.session.start(seconds: 1)
     RunLoop.current.run(until: Date().addingTimeInterval(0.5))
-    let expiryDeadline = controller.session.deadline
+    let oldDeadline = controller.session.deadline!
     menuAction("Timed + display")
-    precondition(controller.session.deadline == expiryDeadline)
+    let refreshedDeadline = controller.session.deadline!
+    precondition(refreshedDeadline > oldDeadline && abs(refreshedDeadline.timeIntervalSinceNow - 2) < 0.3)
+    RunLoop.current.run(until: Date().addingTimeInterval(0.7))
+    precondition(controller.session.running && controller.session.deadline == refreshedDeadline, "The old expiry timer must not stop a refreshed session")
     let expiryLimit = Date().addingTimeInterval(3)
     while controller.session.running && Date() < expiryLimit { drain() }
-    precondition(!controller.session.running, "Preserved timer must expire")
-    precondition(Date().timeIntervalSince(expiryDeadline!) < 0.4, "Switching must not extend the original expiry by rounded caffeinate seconds")
-    try controller.session.start(seconds: 2)
-    controller.session.deadline = Date().addingTimeInterval(-1)
-    controller.startDisplayAwake(nil)
-    precondition(!controller.session.running, "An elapsed timer must not be revived by switching")
+    precondition(!controller.session.running, "The refreshed timer must expire normally")
+    // A changed saved duration applies on the next timed-mode switch, not mid-session.
+    try controller.session.start(seconds: 5, keepDisplayAwake: true)
+    controller.preferences.set(3, forKey: "duration")
+    menuAction("Timed")
+    precondition(controller.session.process?.arguments == ["-t", "3"] + ownerArguments)
+    precondition(abs(controller.session.deadline!.timeIntervalSinceNow - 3) < 0.3)
+    try controller.session.stop()
+    controller.preferences.set(5400, forKey: "duration")
     let expiringChild = try stubbornChild()
     controller.session.process = expiringChild
     controller.session.deadline = Date().addingTimeInterval(0.02)
     controller.startDisplayAwake(nil)
-    precondition(!controller.session.running && !expiringChild.isRunning, "A timer that expires during stop must not start a replacement")
+    precondition(controller.session.mode == .displayAwake && !expiringChild.isRunning, "A switch must start a fresh timer after the old child is stopped")
+    precondition(abs(controller.session.deadline!.timeIntervalSinceNow - 5400) < 1)
     precondition(expiringChild.terminationReason == .uncaughtSignal && expiringChild.terminationStatus == SIGKILL, "Stop must escalate when SIGTERM is ignored")
-    print("PASS: all 12 menu mode selections, checked states, same-mode no-op, saved-duration starts, preserved timers, explicit restart, shortcuts and near-expiry cleanup")
+    try controller.session.stop()
+    print("PASS: all 12 menu mode selections, same-mode no-op, full-duration timed switches in both directions, Control D refresh, saved-duration changes, old timer cancellation and expiry cleanup")
     // Exercise the actual OS owner watcher, including death immediately after spawn.
 
     for signal in [SIGTERM, SIGKILL] {

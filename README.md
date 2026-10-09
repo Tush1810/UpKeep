@@ -89,7 +89,7 @@ Add **Upkeep.app** under **System Settings → General → Login Items → Open 
 | Double-tap **Control (⌃)** | Start a timed session when off; stop the current timed or unlimited session when active |
 | **Control + Shift (⌃ ⇧)** | Open Settings |
 | **Control + I (⌃ I)** | Start an unlimited session, or change the current timed session to unlimited |
-| **Control + D (⌃ D)** | Select timed + display mode; preserve an active timed deadline, or start a saved-duration timer from off/infinite |
+| **Control + D (⌃ D)** | Switch to timed + display with a fresh saved-duration timer; no reset when already active |
 
 Double-tap Control with two quick press-and-release taps, no more than **450 ms** apart. Either Control key works. A long hold, another key or modifier, or a mouse click cancels the double-tap sequence. For Settings, press Control and Shift together; either order works.
 
@@ -97,7 +97,7 @@ The shortcuts are currently fixed. The listener is passive, so a shortcut can al
 
 Pressing Control + I during an unlimited session leaves it running. Double-tap Control, choose **Stop Upkeep** from the menu, or quit Upkeep to stop it.
 
-**Control + D** selects timed + display mode. When already in that mode, it leaves the process and timer unchanged. From an ordinary timed session it preserves the remaining time; from off or infinite mode it starts a fresh timer using the saved duration. The cup turns cyan with a countdown, and the menu, tooltip, and Settings identify **display awake** mode. Double-Control stops it; its sleep prevention also ends when the timer expires or you quit Upkeep. Control + I selects infinite mode and releases display sleep prevention.
+**Control + D** selects timed + display mode. When already in that mode, it leaves the process and timer unchanged. From ordinary timed, off, or infinite mode it starts a fresh timer using the full saved duration. The cup turns cyan with a countdown, and the menu, tooltip, and Settings identify **display awake** mode. Double-Control stops it; its sleep prevention also ends when the timer expires or you quit Upkeep. Control + I selects infinite mode and releases display sleep prevention.
 
 ### Switch modes from the coffee cup
 
@@ -106,14 +106,14 @@ The menu always offers **Timed**, **Infinite**, and **Timed + display**. A check
 | Selection | Behavior |
 | --- | --- |
 | Select the current mode | Keep the current process and timer unchanged |
-| Timed ↔ Timed + display | Keep the original deadline; change display sleep prevention |
+| Timed ↔ Timed + display | Start a fresh timer using the full saved duration; change display sleep prevention |
 | Either timed mode → Infinite | Remove the deadline and release display sleep prevention |
 | Infinite → either timed mode | Start a fresh timer using the saved duration |
 | Any mode while off | Start that mode; timed modes use the saved duration |
 | Restart timer | Start the current timed mode again using the full saved duration |
 | Stop Upkeep | End the current session and return to off |
 
-**Restart timer** appears only during timed modes; **Stop Upkeep** appears whenever active. **Settings…** and **Quit Upkeep** remain available. Selecting a different mode replaces the owned caffeinate process; selecting the same mode does not. Countdown and mode colors remain visible. Timed transitions retain the deadline even if you changed the saved duration; only a fresh start or explicit restart uses the new setting. An elapsed timed session is stopped rather than revived by switching.
+**Restart timer** appears only during timed modes; **Stop Upkeep** appears whenever active. **Settings…** and **Quit Upkeep** remain available. Selecting a different mode replaces the owned caffeinate process; selecting the same mode does not. Countdown and mode colors remain visible. Every switch to a different timed mode resets the countdown using the latest saved duration. For example, with a one-hour setting, switching after 30 minutes starts a new full hour; switching back later starts another full hour. Clicking the mode already active leaves its current countdown unchanged.
 
 ### Change the duration
 
@@ -127,7 +127,7 @@ Open Settings from the menu or with **Control + Shift**. Enter a positive number
 
 Settings opens in **Minutes** by default. Changing the unit converts the displayed value, preserving the duration. Click **Save duration** to save and close the window. Invalid input leaves the window open so you can correct it.
 
-Your duration is remembered between launches and applies to the **next fresh timed start or explicit restart**. Saving a duration does not change a session already running. Unlimited sessions have no timeout.
+Your duration is remembered between launches and applies to the **next timed start, timed-mode switch, or explicit restart**. Saving a duration does not change a session already running. Unlimited sessions have no timeout.
 
 ### Read the menu bar indicator
 
@@ -150,7 +150,7 @@ Every session watches its owning Upkeep process using caffeinate's `-w` option. 
 
 Session changes are serialized on the main thread. Switching stops the old process before starting its replacement, and delayed exit callbacks check process identity before changing state. Stopping allows 250 ms for normal termination, then uses a targeted forced kill with a further 750 ms bound. If the previous child still cannot be stopped, Upkeep reports an error and does not start another process. Other applications' caffeinate processes are left alone.
 
-An app timer enforces the original timed deadline when switching, while caffeinate also has its own timeout as a fallback. The owner watcher depends on macOS scheduling caffeinate; it is not an instantaneous cleanup guarantee if the child itself is externally suspended or the OS is stalled.
+An app timer enforces each timed session’s deadline, while caffeinate also has its own timeout as a fallback. The owner watcher depends on macOS scheduling caffeinate; it is not an instantaneous cleanup guarantee if the child itself is externally suspended or the OS is stalled.
 
 ## Update
 
@@ -198,7 +198,7 @@ The default branch is **dev**. After building, run the built-in checks:
 ./Upkeep.app/Contents/MacOS/Upkeep --self-test
 ```
 
-These checks cover duration conversion and validation, saving and closing Settings, timed expiry, unlimited sessions, session transitions, process cleanup, double-Control detection, and shortcut action routing. Display-awake checks inspect the actual macOS display and system power assertions, verify their release on timeout and stop, and check mode transitions, key-repeat filtering, and use of the saved duration. Menu checks exercise every source/target mode pair through the actual menu actions, checked states, same-mode no-ops, preserved deadlines, explicit restart, and near-expiry switching. Lifecycle checks also kill isolated owner fixtures in every mode, test immediate owner death, stop a frozen child, check rapid replacements and stale callbacks, and verify unrelated caffeinate processes are untouched. Tests briefly open a Settings window and use an isolated preferences domain, leaving your saved duration unchanged.
+These checks cover duration conversion and validation, saving and closing Settings, timed expiry, unlimited sessions, session transitions, process cleanup, double-Control detection, and shortcut action routing. Display-awake checks inspect the actual macOS display and system power assertions, verify their release on timeout and stop, and check mode transitions, key-repeat filtering, and use of the saved duration. Menu checks exercise every source/target mode pair through the actual menu actions, checked states, same-mode no-ops, full-duration resets in both timed-switch directions, saved-duration changes, explicit restart, old timer cancellation, and near-expiry switching. Lifecycle checks also kill isolated owner fixtures in every mode, test immediate owner death, stop a frozen child, check rapid replacements and stale callbacks, and verify unrelated caffeinate processes are untouched. Tests briefly open a Settings window and use an isolated preferences domain, leaving your saved duration unchanged.
 
 For an end-to-end global shortcut check, enable Input Monitoring and focus another app:
 
