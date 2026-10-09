@@ -253,6 +253,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     var item: NSStatusItem!
     let menu = NSMenu()
     var menuCard: MenuStatusCard?
+    var modeEntries: [(SessionMode, NSMenuItem)] = []
+    var restartEntry: NSMenuItem?
+    var stopEntry: NSMenuItem?
+    var displayEntry: NSMenuItem?
     var timer: Timer?
     var externalCount = 0
     var scanPending = false
@@ -379,6 +383,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
     func refresh() {
         menuCard?.update(mode: session.mode, deadline: session.deadline, seconds: seconds)
+        for (mode, entry) in modeEntries {
+            entry.state = session.mode == mode ? .on : .off
+            entry.attributedTitle = NSAttributedString(string: mode.title, attributes: [.font: NSFont.systemFont(ofSize: 13, weight: session.mode == mode ? .semibold : .regular)])
+        }
+        restartEntry?.isHidden = !session.running || session.deadline == nil
+        restartEntry?.title = "Restart timer · \(durationNumber(Double(seconds) / 60)) minutes"
+        stopEntry?.isHidden = !session.running
+        displayEntry?.isHidden = !session.keepsDisplayAwake || !session.running
         let active = session.running
         stateLabel?.stringValue = active ? (session.keepsDisplayAwake ? "Upkeep active · display awake" : session.deadline == nil ? "Upkeep active · unlimited" : "Upkeep session active") : "Upkeep is off"
         stateLabel?.textColor = active ? session.mode.color : .secondaryLabelColor
@@ -402,6 +414,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
     func menuWillOpen(_ menu: NSMenu) {
         menu.removeAllItems()
+        modeEntries.removeAll()
         let header = NSMenuItem(title: "Upkeep · \(session.mode.title)", action: nil, keyEquivalent: "")
         let card = MenuStatusCard(); card.update(mode: session.mode, deadline: session.deadline, seconds: seconds)
         header.view = card; menuCard = card; menu.addItem(header)
@@ -412,23 +425,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         menu.addItem(section)
         for (mode, action) in [(SessionMode.timed, #selector(startTimed(_:))), (.unlimited, #selector(startUnlimited(_:))), (.displayAwake, #selector(startDisplayAwake(_:)))] {
             let entry = add(mode.title, action)
-            entry.state = session.mode == mode ? .on : .off
+            modeEntries.append((mode, entry))
             entry.image = menuSymbol(mode == .timed ? "timer" : mode == .unlimited ? "infinity" : "display", color: mode.color)
-            entry.attributedTitle = NSAttributedString(string: mode.title, attributes: [.font: NSFont.systemFont(ofSize: 13, weight: session.mode == mode ? .semibold : .regular)])
-
         }
-        if session.keepsDisplayAwake { menu.addItem(NSMenuItem(title: "Display kept awake until this session ends", action: nil, keyEquivalent: "")) }
+        let displayNote = NSMenuItem(title: "Display kept awake until this session ends", action: nil, keyEquivalent: "")
+        displayEntry = displayNote; menu.addItem(displayNote)
         menu.addItem(.separator())
-        if session.running, session.deadline != nil {
-            add("Restart timer · \(durationNumber(Double(seconds) / 60)) minutes", #selector(restartTimer(_:))).image = menuSymbol("arrow.clockwise")
-        }
-        if session.running { add("Stop Upkeep", #selector(stopSession(_:))).image = menuSymbol("stop.circle.fill", color: .systemRed) }
+        restartEntry = add("Restart timer", #selector(restartTimer(_:)))
+        restartEntry?.image = menuSymbol("arrow.clockwise")
+        stopEntry = add("Stop Upkeep", #selector(stopSession(_:)))
+        stopEntry?.image = menuSymbol("stop.circle.fill", color: .systemRed)
         let hint = NSMenuItem(title: "⌃ twice · start / stop    ⌃⇧ · settings", action: nil, keyEquivalent: "")
         hint.attributedTitle = NSAttributedString(string: hint.title, attributes: [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.secondaryLabelColor])
         menu.addItem(hint)
 
         menu.addItem(.separator()); add("Settings…", #selector(showSettings(_:))).image = menuSymbol("gearshape")
         add("Quit Upkeep", #selector(quit(_:))).image = menuSymbol("power")
+        refresh()
     }
     @discardableResult
     func add(_ title: String, _ action: Selector) -> NSMenuItem {
@@ -666,6 +679,7 @@ if CommandLine.arguments.contains("--lifecycle-test-owner") {
     controller.preferences = UserDefaults(suiteName: testDomain)!
     defer { controller.preferences.removePersistentDomain(forName: testDomain) }
     controller.item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+    controller.session.changed = { [weak controller] in controller?.refresh() }
     controller.preferences.register(defaults: ["duration": 7200])
     func drain() { RunLoop.current.run(until: Date().addingTimeInterval(0.15)) }
     func controlDouble(_ start: Double) {
@@ -733,7 +747,7 @@ if CommandLine.arguments.contains("--lifecycle-test-owner") {
     try verifyDisplayAssertions(shortcutDisplayPID)
     controller.refresh(); controller.menuWillOpen(controller.menu)
     precondition(controller.item.button?.toolTip?.contains("display awake") == true)
-    precondition(controller.menu.items.contains { $0.title == "Display kept awake until this session ends" })
+    precondition(controller.menu.items.contains { !$0.isHidden && $0.title == "Display kept awake until this session ends" })
     controller.handleShortcutEvent(type: .keyDown, key: 2, flags: .maskControl, time: 21.1, repeated: true)
     drain()
     precondition(controller.session.process?.processIdentifier == shortcutDisplayPID, "Held Control D must not restart the timer")
@@ -790,12 +804,11 @@ if CommandLine.arguments.contains("--lifecycle-test-owner") {
                 precondition(abs(controller.session.deadline!.timeIntervalSinceNow - Double(controller.seconds)) < 1, "A fresh timer must use the saved duration")
             } else { precondition(controller.session.deadline == nil) }
             if let previousPID, source != target { precondition(kill(previousPID, 0) == -1, "Replaced child survived") }
-            controller.menuWillOpen(controller.menu)
             let checked = controller.menu.items.filter { $0.state == .on }
             precondition(checked.count == 1 && checked[0].title == target.title)
             precondition(modes.allSatisfy { mode in controller.menu.items.contains { $0.title == mode.title && $0.action != nil } })
-            precondition(controller.menu.items.contains { $0.title == "Stop Upkeep" })
-            precondition(controller.menu.items.contains { $0.title.hasPrefix("Restart timer") } == (target != .unlimited))
+            precondition(controller.menu.items.contains { !$0.isHidden && $0.title == "Stop Upkeep" })
+            precondition(controller.menu.items.contains { !$0.isHidden && $0.title.hasPrefix("Restart timer") } == (target != .unlimited))
             precondition(controller.stateLabel?.textColor == target.color && controller.item.button?.image?.isTemplate == false)
             if target == .unlimited { precondition(controller.item.button?.title == " ∞") }
             if target == .displayAwake { try verifyDisplayAssertions(controller.session.process!.processIdentifier) }
@@ -804,7 +817,30 @@ if CommandLine.arguments.contains("--lifecycle-test-owner") {
         }
     }
     controller.menuWillOpen(controller.menu)
-    precondition(!controller.menu.items.contains { $0.state == .on || $0.title == "Stop Upkeep" || $0.title.hasPrefix("Restart timer") })
+    precondition(!controller.menu.items.contains { !$0.isHidden && ($0.state == .on || $0.title == "Stop Upkeep" || $0.title.hasPrefix("Restart timer")) })
+    // Keep the same menu objects throughout shortcut changes, as when the dropdown stays open.
+    let liveEntries = controller.menu.items
+    func verifyLiveMenu(_ mode: SessionMode) {
+        precondition(zip(liveEntries, controller.menu.items).allSatisfy { $0 === $1 } && liveEntries.count == controller.menu.items.count, "Live updates must not rebuild the tracked menu")
+        let checked = controller.menu.items.filter { $0.state == .on }
+        precondition(mode == .off ? checked.isEmpty : checked.count == 1 && checked[0].title == mode.title)
+        precondition(controller.stopEntry?.isHidden == (mode == .off))
+        precondition(controller.restartEntry?.isHidden == (mode == .off || mode == .unlimited))
+        precondition(controller.displayEntry?.isHidden == (mode != .displayAwake))
+        precondition(controller.menuCard?.modeLabel.stringValue == mode.title.uppercased())
+    }
+    controller.toggle(nil); verifyLiveMenu(.timed)
+    controller.handleShortcutEvent(type: .keyDown, key: 34, flags: .maskControl, time: 40)
+    drain(); verifyLiveMenu(.unlimited)
+    controller.handleShortcutEvent(type: .keyDown, key: 2, flags: .maskControl, time: 41)
+    drain(); verifyLiveMenu(.displayAwake)
+    controller.toggle(nil); verifyLiveMenu(.off)
+    try controller.session.start(seconds: 1)
+    verifyLiveMenu(.timed)
+    let liveExpiryLimit = Date().addingTimeInterval(3)
+    while controller.session.running && Date() < liveExpiryLimit { drain() }
+    verifyLiveMenu(.off)
+    print("PASS: open-menu checks, stop/restart visibility and display note update through shortcuts and expiry without rebuilding")
     try controller.session.start(seconds: 5, keepDisplayAwake: true)
     let restartPID = controller.session.process!.processIdentifier
     menuAction("Restart timer · 90 minutes")

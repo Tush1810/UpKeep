@@ -115,6 +115,8 @@ The menu always offers **Timed**, **Infinite**, and **Timed + display**. A check
 
 **Restart timer** appears only during timed modes; **Stop Upkeep** appears whenever active. **Settings…** and **Quit Upkeep** remain available. Selecting a different mode replaces the owned caffeinate process; selecting the same mode does not. Countdown and mode colors remain visible. Every switch to a different timed mode resets the countdown using the latest saved duration. For example, with a one-hour setting, switching after 30 minutes starts a new full hour; switching back later starts another full hour. Clicking the mode already active leaves its current countdown unchanged.
 
+While the dropdown is open, shortcut changes and timer expiry update its checkmark, mode label, and available session controls immediately. Stop appears only while active; Restart timer appears only during timed modes.
+
 ### Change the duration
 
 Open Settings from the menu or with **Control + Shift**. Enter a positive number and choose **Minutes** or **Hours** from the dropdown:
