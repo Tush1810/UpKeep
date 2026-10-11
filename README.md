@@ -165,7 +165,7 @@ Every session watches its owning Upkeep process using caffeinate's `-w` option. 
 
 Session changes are serialized on the main thread. Switching stops the old process before starting its replacement, and delayed exit callbacks check process identity before changing state. Stopping allows 250 ms for normal termination, then uses a targeted forced kill with a further 750 ms bound. If the previous child still cannot be stopped, Upkeep reports an error and does not start another process. Other applications' caffeinate processes are left alone.
 
-An app timer enforces each timed session’s deadline, while caffeinate also has its own timeout as a fallback. The owner watcher depends on macOS scheduling caffeinate; it is not an instantaneous cleanup guarantee if the child itself is externally suspended or the OS is stalled.
+Timed sessions use a wall-clock deadline: time spent asleep counts toward the duration. Upkeep checks this deadline when the Mac wakes and during each UI refresh, as well as using an expiry timer. If a session expired while asleep, Upkeep stops its owned process and returns to off on wake; an unexpired session keeps its existing deadline, and Infinite stays active. This also recovers delayed timer callbacks without leaving a stale `1s` indicator. The owner watcher depends on macOS scheduling caffeinate; it is not an instantaneous cleanup guarantee if the child itself is externally suspended or the OS is stalled.
 
 ## Update
 

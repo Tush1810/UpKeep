@@ -220,6 +220,11 @@ final class Session {
         process = nil; deadline = nil; keepsDisplayAwake = false
         changed?()
     }
+    func expireIfNeeded(now: Date = Date()) throws {
+        precondition(Thread.isMainThread, "Session changes must run on the main thread")
+        guard let deadline, deadline <= now else { return }
+        try stop()
+    }
     private func waitForExit(_ child: Process, timeout: TimeInterval) {
         let end = ProcessInfo.processInfo.systemUptime + timeout
         while child.isRunning && ProcessInfo.processInfo.systemUptime < end {
@@ -265,6 +270,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     var stopEntry: NSMenuItem?
     var displayEntry: NSMenuItem?
     var timer: Timer?
+    var wakeObserver: NSObjectProtocol?
     var externalCount = 0
     var scanPending = false
     var controlDetector = DoubleControlDetector()
@@ -292,6 +298,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         item.autosaveName = "BrewCoffee"
         menu.delegate = self; item.menu = menu
         session.changed = { [weak self] in self?.refresh() }
+        installWakeObserver()
         installLocalShortcutMonitor()
         startShortcutMonitor()
         refresh(); scanExternal()
@@ -389,6 +396,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         }
     }
     func refresh() {
+        // Timers may be delayed during sleep; the wall-clock deadline remains authoritative.
+        do { try session.expireIfNeeded() } catch { errorLabel?.stringValue = error.localizedDescription }
         menuCard?.update(mode: session.mode, deadline: session.deadline, seconds: seconds)
         for (mode, entry) in modeEntries {
             entry.state = session.mode == mode ? .on : .off
@@ -417,6 +426,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         } else {
             item.button?.title = ""
             item.button?.toolTip = "Upkeep is off" + (externalCount > 0 ? " · external caffeinate running (\(externalCount))" : "")
+        }
+    }
+    func installWakeObserver() {
+        guard wakeObserver == nil else { return }
+        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.controlDetector.reset()
+            self?.settingsChordHeld = false
+            self?.refresh()
         }
     }
     func menuWillOpen(_ menu: NSMenu) {
@@ -521,6 +538,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
     @objc func quit(_ sender: Any?) { NSApp.terminate(nil) }
     func applicationWillTerminate(_ notification: Notification) {
+        if let wakeObserver { NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver); self.wakeObserver = nil }
         timer?.invalidate(); try? session.stop()
         if let localMonitor { NSEvent.removeMonitor(localMonitor) }
         if let eventTap { CFMachPortInvalidate(eventTap) }
@@ -848,6 +866,32 @@ if CommandLine.arguments.contains("--lifecycle-test-owner") {
     while controller.session.running && Date() < liveExpiryLimit { drain() }
     verifyLiveMenu(.off)
     print("PASS: open-menu checks, stop/restart visibility and display note update through shortcuts and expiry without rebuilding")
+    controller.installWakeObserver()
+    defer { if let observer = controller.wakeObserver { NSWorkspace.shared.notificationCenter.removeObserver(observer) } }
+    for mode in [SessionMode.timed, .displayAwake] {
+        try controller.session.start(seconds: 60, keepDisplayAwake: mode == .displayAwake)
+        let sleepingChild = controller.session.process!
+        // Leave the actual timer scheduled in the future to reproduce a missed callback.
+        controller.session.deadline = Date().addingTimeInterval(-3600)
+        NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.didWakeNotification, object: nil)
+        verifyLiveMenu(.off)
+        precondition(!sleepingChild.isRunning && controller.item.button?.title == "" && controller.session.deadline == nil, "Wake must stop an overdue session and clear 1s indicator")
+    }
+    try controller.session.start(seconds: 60)
+    let resumedPID = controller.session.process!.processIdentifier, resumedDeadline = controller.session.deadline
+    NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.didWakeNotification, object: nil)
+    precondition(controller.session.process?.processIdentifier == resumedPID && controller.session.deadline == resumedDeadline, "Wake before expiry must preserve the session")
+    controller.session.deadline = Date().addingTimeInterval(-1)
+    controller.refresh()
+    verifyLiveMenu(.off)
+    precondition(kill(resumedPID, 0) == -1, "Refresh must recover a missed expiry even without a wake notification")
+    try controller.session.start(seconds: nil)
+    let awakeUnlimitedPID = controller.session.process!.processIdentifier
+    NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.didWakeNotification, object: nil)
+    try controller.session.expireIfNeeded(now: Date.distantFuture)
+    precondition(controller.session.process?.processIdentifier == awakeUnlimitedPID, "Wake must leave infinite sessions running")
+    try controller.session.stop()
+    print("PASS: missed expiry recovery on wake and refresh, both timed modes, unchanged unexpired/infinite sessions and released owned processes")
     try controller.session.start(seconds: 5, keepDisplayAwake: true)
     let restartPID = controller.session.process!.processIdentifier
     menuAction("Restart timer · 90 minutes")
